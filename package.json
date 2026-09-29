@@ -1,0 +1,32 @@
+{
+  "name": "ai-gateway",
+  "version": "0.1.6",
+  "description": "玄枢（XuanShu）— 本地 AI 模型聚合路由网关：把多家上游模型收拢成统一入口，支持故障转移 / 轮询 / 加权路由",
+  "type": "module",
+  "main": "electron/main.js",
+  "author": "老葛",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "vite",
+    "build": "vite build",
+    "backend": "node electron/backend/index.js",
+    "test": "node test/run.mjs",
+    "dist": "vite build && electron-builder --config electron-builder.config.js --win nsis"
+  },
+  "dependencies": {
+    "@esbuild/win32-x64": "^0.28.2",
+    "@rollup/rollup-win32-x64-msvc": "^4.63.5",
+    "express": "^4.19.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "electron": "^31.3.1",
+    "electron-builder": "^24.13.3",
+    "vite": "^5.4.2"
+  }
+}

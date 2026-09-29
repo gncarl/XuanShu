@@ -1,0 +1,27 @@
+node_modules/
+dist/
+release/
+build-out/
+installer-out/
+dist-final/
+dist-*/
+
+# 运行期数据（含令牌/密钥，绝不入库）
+data/
+*.log
+
+# 构建/编辑器临时产物
+*.timestamp-*.mjs
+
+# 根目录多余的 preload.cjs 副本（真正使用的是 electron/preload.cjs）
+/preload.cjs
+
+# 本地调试截图
+_shot_*.png
+_ui*.png
+
+# 冗余的签名脚本副本（打包实际引用的是 tools/unsigned-sign.cjs）
+tools/unsigned-sign.js
+
+.DS_Store
+Thumbs.db
