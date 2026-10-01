@@ -80,6 +80,31 @@ function setupIpc() {
   ipcMain.handle('window:close', () => mainWindow?.close());
   ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false);
   ipcMain.handle('app:ports', () => ports);
+
+  // 开机启动：打包后注册 exe 本身；开发模式下 Electron 没有独立 exe 可注册，直接返回 false。
+  // 附带 --hidden 参数，开机自启时不弹窗口、只进托盘。
+  ipcMain.handle('app:setAutoLaunch', (_e, enable) => {
+    try {
+      if (!app.isPackaged) return { ok: false, error: 'dev' };
+      app.setLoginItemSettings({
+        openAtLogin: !!enable,
+        path: process.execPath,
+        args: ['--hidden'],
+      });
+      return { ok: true, enabled: !!enable };
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) };
+    }
+  });
+  ipcMain.handle('app:getAutoLaunch', () => {
+    try {
+      if (!app.isPackaged) return { ok: true, enabled: false };
+      const s = app.getLoginItemSettings({ args: ['--hidden'] });
+      return { ok: true, enabled: !!s.openAtLogin };
+    } catch (err) {
+      return { ok: false, error: String(err?.message || err) };
+    }
+  });
 }
 
 function setupTray() {
@@ -93,13 +118,32 @@ function setupTray() {
   }
   tray = new Tray(image);
   const ctx = Menu.buildFromTemplate([
-    { label: '打开玄枢', click: () => mainWindow?.show() },
+    { label: '打开玄枢', click: () => {
+        // 如果窗口不存在，重新创建
+        if (!mainWindow) {
+          createWindow();
+        } else {
+          // 恢复并显示窗口
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.show();
+          mainWindow.focus();
+        }
+      }
+    },
     { type: 'separator' },
     { label: '退出', click: () => app.quit() },
   ]);
   tray.setToolTip('玄枢 · 本地 AI 聚合路由网关');
   tray.setContextMenu(ctx);
-  tray.on('click', () => mainWindow?.show());
+  tray.on('click', () => {
+    if (!mainWindow) {
+      createWindow();
+    } else {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
 }
 
 // 单实例：避免重复启动多个网关
@@ -120,7 +164,8 @@ if (!gotLock) {
       const dataDir = path.join(app.getPath('userData'), 'ai-gateway-data');
       ports = await startBackend({ isDesktop: true, dataDir });
       setupIpc();
-      createWindow();
+      // 开机自启（--hidden）或手动以 --hidden 启动时不弹窗口，只进托盘
+      if (!process.argv.includes('--hidden')) createWindow();
       setupTray();
     } catch (e) {
       logFatal('app.whenReady', e);

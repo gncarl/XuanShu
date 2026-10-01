@@ -8,6 +8,16 @@ import { nowMs } from './util.js';
 
 const MAX_RETRIES = 6;
 
+// 解析可重试状态码列表（设置里的 "500,502,503,504" → Set）
+function parseRetryCodes(s) {
+  const out = new Set();
+  for (const part of String(s || '').split(/[^0-9]+/)) {
+    const n = parseInt(part, 10);
+    if (n >= 100 && n <= 599) out.add(n);
+  }
+  return out;
+}
+
 export class ProxyServer {
   constructor({ store, resilience, router, logstore, settings }) {
     this.store = store;
@@ -106,6 +116,11 @@ export class ProxyServer {
     const stream = !!innerBody.stream;
     let committed = false;
 
+    // 接口重试配置：上游返回可重试状态码时，同一目标先原地重试，再切换下一个
+    const retryCodes = this.settings.retryEnabled ? parseRetryCodes(this.settings.retryStatusCodes) : new Set();
+    const maxRetries = Math.max(0, Math.min(10, Math.floor(Number(this.settings.maxRetries) || 0)));
+    const retryIntervalMs = Math.max(0, (Number(this.settings.retryIntervalSec) || 0) * 1000);
+
     for (const cand of candidates.slice(0, MAX_RETRIES)) {
       const { model, channel } = cand;
       // 尝试前再次确认可用性（状态可能在解析后变化）
@@ -113,13 +128,26 @@ export class ProxyServer {
         attempts.push({ channel: channel.name, model: model.upstreamModel, skipped: true, reason: 'resilience-unavailable' });
         continue;
       }
-      const spec = prepareRequest(channel, model.upstreamModel, innerBody);
       const started = nowMs();
-      let outcome;
-      try {
-        outcome = await this._forwardOnce(spec, { stream, clientProtocol, model, channel, res, requested });
-      } catch (e) {
-        outcome = { type: 'fail', status: 0, empty: false, error: String(e.message || e) };
+      let outcome = null;
+      let sameTargetTry = 0;
+      while (true) {
+        sameTargetTry++;
+        const spec = prepareRequest(channel, model.upstreamModel, innerBody);
+        try {
+          outcome = await this._forwardOnce(spec, { stream, clientProtocol, model, channel, res, requested });
+        } catch (e) {
+          outcome = { type: 'fail', status: 0, empty: false, error: String(e.message || e) };
+        }
+        if (outcome.type === 'commit') break;
+
+        // 可重试状态码 → 同一目标原地重试（重试不记容错，避免一次抖动就冷却模型）
+        if (outcome.status > 0 && retryCodes.has(outcome.status) && sameTargetTry <= maxRetries) {
+          attempts.push({ channel: channel.name, model: model.upstreamModel, status: outcome.status, retry: sameTargetTry });
+          if (retryIntervalMs > 0) await new Promise((r) => setTimeout(r, retryIntervalMs));
+          continue;
+        }
+        break;
       }
 
       if (outcome.type === 'commit') {

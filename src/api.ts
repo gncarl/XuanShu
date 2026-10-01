@@ -62,6 +62,4 @@ export const api = {
   ).toString()),
   logStats: () => req('GET', '/logs/stats'),
   clearLogs: () => req('DELETE', '/logs'),
-
-  connector: (tool: string) => req('GET', `/connectors/${tool}`),
 };

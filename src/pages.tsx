@@ -59,12 +59,21 @@ export function Dashboard({ state, refresh }: { state: State; refresh: () => voi
           <strong>模型分布</strong>
           <div className="mt16">
             {stats && Object.keys(stats.byModel || {}).length === 0 && <div className="muted">暂无数据</div>}
-            {stats && Object.entries(stats.byModel || {}).map(([m, c]: any) => (
-              <div key={m} style={{ marginBottom: 10 }}>
-                <div className="flex between" style={{ fontSize: 12 }}><span>{m}</span><span className="muted">{c}</span></div>
-                <div className="mt8"><Bar value={c} max={Math.max(...(Object.values(stats.byModel) as number[]))} /></div>
-              </div>
-            ))}
+            {stats && (() => {
+              // byModel 值为 { count, tokens }（0.2.0 起），按请求数排序展示
+              const rows = Object.entries(stats.byModel || {}) as [string, { count: number; tokens: number }][];
+              rows.sort((a, b) => b[1].count - a[1].count);
+              const max = Math.max(1, ...rows.map(([, v]) => v.count));
+              return rows.slice(0, 8).map(([m, v]) => (
+                <div key={m} style={{ marginBottom: 10 }}>
+                  <div className="flex between" style={{ fontSize: 12 }}>
+                    <span>{m}</span>
+                    <span className="muted">{v.count} 次 · {fmtCompact(v.tokens)} tokens</span>
+                  </div>
+                  <div className="mt8"><Bar value={v.count} max={max} /></div>
+                </div>
+              ));
+            })()}
           </div>
         </Card>
       </div>
@@ -726,39 +735,221 @@ export function Logs({ state, refresh }: { state: State; refresh: () => void }) 
   );
 }
 
-// =================== Connectors ===================
-export function Connectors({ state }: { state: State }) {
-  const [snippet, setSnippet] = useState<any>(null);
-  const tools = ['claude', 'opencode', 'codex', 'zed'];
-  const open = async (t: string) => { const s = await api.connector(t); setSnippet({ t, s }); };
+// =================== Stats（统计）==================
+function fmtCompact(n: number) {
+  const v = n || 0;
+  if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+  if (v >= 1e3) return (v / 1e3).toFixed(2) + 'K';
+  return String(v);
+}
+
+// 热力图颜色档位（按请求数）：0 / 少 / 中 / 多 / 很多
+function heatLevel(count: number) {
+  if (!count) return 0;
+  if (count < 5) return 1;
+  if (count < 20) return 2;
+  if (count < 60) return 3;
+  return 4;
+}
+
+export function Stats({ state }: { state: State }) {
+  const [stats, setStats] = useState<any>(null);
+  const [tab, setTab] = useState<'year' | '30d'>('year');
+  const [metric, setMetric] = useState<'count' | 'tokens'>('count');
+  const [provTab, setProvTab] = useState<'provider' | 'model'>('provider');
+  const load = () => api.logStats().then(setStats).catch(() => {});
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
+
+  const hm = stats?.heatmap || [];
+  const t30 = stats?.trend30 || [];
+
+  // 热力图按周组织：第一列补齐到周日开始，之后每 7 天一列
+  const weeks: { date: string; count: number; tokens: number }[][] = [];
+  let cur: { date: string; count: number; tokens: number }[] = [];
+  hm.forEach((d: any) => {
+    const dow = (new Date(d.date + 'T00:00:00').getDay() + 6) % 7; // 周一=0
+    if (cur.length === 0 && dow > 0) { for (let i = 0; i < dow; i++) cur.push({ date: '', count: -1, tokens: 0 }); }
+    cur.push(d);
+    if (cur.length === 7) { weeks.push(cur); cur = []; }
+  });
+  if (cur.length) weeks.push(cur);
+
+  // 月份标签：每月第一列的位置
+  const monthLabels: { idx: number; label: string }[] = [];
+  let lastMonth = -1;
+  weeks.forEach((w, i) => {
+    const first = w.find((d) => d.date);
+    if (!first) return;
+    const m = new Date(first.date + 'T00:00:00').getMonth();
+    if (m !== lastMonth) { monthLabels.push({ idx: i, label: `${m + 1}月` }); lastMonth = m; }
+  });
+  const DOW = ['一', '三', '五', '日'];
+
+  const providerRows = Object.entries(stats?.byChannel || {}).sort((a: any, b: any) => b[1].tokens - a[1].tokens);
+  const modelRows = Object.entries(stats?.byModel || {}).sort((a: any, b: any) => b[1].tokens - a[1].tokens);
+
   return (
     <div>
-      <h1>App 连接器</h1>
-      <p className="lead">一键生成常见 AI 工具的接入配置，把流量导到本网关。</p>
-      <div className="grid cols-2 mt16">
-        {tools.map((t) => (
-          <Card key={t} className="flex between center">
-            <div><strong>{t}</strong><div className="muted" style={{ fontSize: 12 }}>生成 {t} 接入片段</div></div>
-            <button className="btn" onClick={() => open(t)}>生成</button>
-          </Card>
-        ))}
-      </div>
-      {snippet && (
-        <Modal title={`${snippet.t} 接入配置`} onClose={() => setSnippet(null)}>
-          <p className="muted">{snippet.s.note}</p>
-          {snippet.s.env && <div className="mt8"><div className="muted" style={{ fontSize: 12 }}>环境变量</div><div className="code mt8">{JSON.stringify(snippet.s.env, null, 2)}</div></div>}
-          {snippet.s.config && <div className="mt8"><div className="muted" style={{ fontSize: 12 }}>配置</div><div className="code mt8">{JSON.stringify(snippet.s.config, null, 2)}</div></div>}
-          <div className="modal-actions"><CopyBtn text={JSON.stringify(snippet.s.env || snippet.s.config, null, 2)} label="复制配置" /></div>
-        </Modal>
-      )}
+      <h1>统计</h1>
+      <p className="lead">请求与 Token 用量的长期统计，全部基于本机日志计算。</p>
+
+      {/* 今日统计 */}
+      <Card className="today-card">
+        <div className="today-label">今日统计</div>
+        <div className="today-grid">
+          <div className="today-item">
+            <div className="tv">{fmtNum(stats?.today?.count)}</div>
+            <div className="tl">今日调用次数</div>
+          </div>
+          <div className="today-item">
+            <div className="tv">{fmtCompact(stats?.today?.tokens)}</div>
+            <div className="tl">今日 Token</div>
+          </div>
+        </div>
+        <div className="all-grid">
+          <div className="today-item">
+            <div className="tv">{fmtNum(stats?.total)}</div>
+            <div className="tl">总请求数</div>
+          </div>
+          <div className="today-item">
+            <div className="tv">{fmtCompact(stats?.totalTokens)}</div>
+            <div className="tl">TOKEN 消耗</div>
+          </div>
+          <div className="today-item">
+            <div className="tv">{fmtNum(stats?.avgPerDay)}</div>
+            <div className="tl">日均请求</div>
+          </div>
+        </div>
+        <div className="pc-row">
+          <span>Prompt <b className="accent">{fmtCompact(stats?.promptTokens)}</b></span>
+          <span>Completion <b className="accent">{fmtCompact(stats?.completionTokens)}</b></span>
+        </div>
+      </Card>
+
+      {/* 热力图 / 30 天趋势 */}
+      <Card className="mt16">
+        <div className="seg-tabs">
+          <button className={`seg-tab ${tab === 'year' ? 'active' : ''}`} onClick={() => setTab('year')}>全年热力图</button>
+          <button className={`seg-tab ${tab === '30d' ? 'active' : ''}`} onClick={() => setTab('30d')}>30 天趋势</button>
+        </div>
+
+        {tab === 'year' && (
+          <>
+            <div className="seg-pills mt8">
+              <button className={`pill ${metric === 'count' ? 'active' : ''}`} onClick={() => setMetric('count')}>请求数</button>
+              <button className={`pill ${metric === 'tokens' ? 'active' : ''}`} onClick={() => setMetric('tokens')}>Token</button>
+            </div>
+            <div className="heatmap-wrap">
+              <div className="hm-months">
+                {weeks.map((_, i) => {
+                  const lab = monthLabels.find((m) => m.idx === i);
+                  return <span key={i}>{lab ? lab.label : ''}</span>;
+                })}
+              </div>
+              <div className="hm-flex">
+                <div className="hm-dow">
+                  {DOW.map((d) => <span key={d}>{d}</span>)}
+                </div>
+                <div className="hm-scroll">
+                  <div className="hm-grid">
+                    {weeks.map((w, wi) => (
+                      <div key={wi} className="hm-col">
+                        {w.map((d, di) => (
+                          <div
+                            key={di}
+                            className={`hm-cell lv${d.count < 0 ? 'x' : heatLevel(metric === 'count' ? d.count : d.tokens)}`}
+                            title={d.date ? `${d.date} · ${d.count} 次 · ${d.tokens} tokens` : ''}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="hm-legend">少 <span className="hm-cell lv0" /><span className="hm-cell lv1" /><span className="hm-cell lv2" /><span className="hm-cell lv3" /><span className="hm-cell lv4" /> 多</div>
+            </div>
+          </>
+        )}
+
+        {tab === '30d' && (
+          <div className="trend30 mt8">
+            {t30.map((d: any) => {
+              const max = Math.max(1, ...t30.map((x: any) => (metric === 'count' ? x.count : x.tokens)));
+              const h = Math.round(((metric === 'count' ? d.count : d.tokens) / max) * 72);
+              return (
+                <div key={d.date} className="t30-col" title={`${d.date} · ${d.count} 次 · ${d.tokens} tokens`}>
+                  <div className="t30-bar" style={{ height: Math.max(2, h) }} />
+                  <div className="t30-day">{new Date(d.date + 'T00:00:00').getDate()}</div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
+      {/* 提供商 / 模型 */}
+      <Card className="mt16">
+        <div className="seg-tabs">
+          <button className={`seg-tab ${provTab === 'provider' ? 'active' : ''}`} onClick={() => setProvTab('provider')}>提供商</button>
+          <button className={`seg-tab ${provTab === 'model' ? 'active' : ''}`} onClick={() => setProvTab('model')}>模型</button>
+        </div>
+        <div className="mt8">
+          {(provTab === 'provider' ? providerRows : modelRows).map(([name, v]: any) => (
+            <div key={name} className="stat-row">
+              <span className="stat-name">{name}</span>
+              <span className="stat-nums">
+                <b className="accent">{fmtCompact(v.tokens)}</b>
+                <span className="muted">{fmtNum(v.count)} 次</span>
+              </span>
+            </div>
+          ))}
+          {(provTab === 'provider' ? providerRows : modelRows).length === 0 && (
+            <div className="empty">暂无数据，先去发几个请求</div>
+          )}
+        </div>
+      </Card>
     </div>
   );
 }
 
 // =================== Settings ===================
+// 行式设置布局：左侧标签 + 描述，右侧控件，行间分隔线（参照主流桌面客户端设置页）
+function Row({ label, desc, children, borderBottom = true }: { label: string; desc?: string; children: React.ReactNode; borderBottom?: boolean }) {
+  return (
+    <div className={`set-row ${borderBottom ? 'bordered' : ''}`}>
+      <div className="set-left">
+        <div className="set-label">{label}</div>
+        {desc && <div className="set-desc">{desc}</div>}
+      </div>
+      <div className="set-right">{children}</div>
+    </div>
+  );
+}
+
+// 橙色方形勾选框（勾选态填充 accent 色）
+function CheckBox({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
+  return (
+    <label className={`cbx ${disabled ? 'dis' : ''}`}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span className="cbx-box">{checked && (
+        <svg width="11" height="11" viewBox="0 0 12 12"><path d="M2 6.2 4.8 9 10 3.4" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+      )}</span>
+    </label>
+  );
+}
+
 export function Settings({ state, refresh, setState }: { state: State; refresh: () => void; setState: any }) {
   const toast = useToast();
   const [s, setS] = useState({ ...state.settings });
+  const [autoLaunch, setAutoLaunch] = useState(false);
+  const isDesktop = !!(window as any).app;
+
+  useEffect(() => {
+    if (isDesktop) {
+      (window as any).app.getAutoLaunch().then((r: any) => { if (r?.ok) setAutoLaunch(!!r.enabled); }).catch(() => {});
+    }
+  }, []);
 
   const save = async (patch: any) => {
     const ns = { ...s, ...patch }; setS(ns); setState((prev: State) => ({ ...prev, settings: ns }));
@@ -767,70 +958,116 @@ export function Settings({ state, refresh, setState }: { state: State; refresh: 
     toast('已保存'); refresh();
   };
 
+  const toggleAutoLaunch = async (v: boolean) => {
+    try {
+      const r = await (window as any).app.setAutoLaunch(v);
+      if (r?.ok) { setAutoLaunch(v); toast(v ? '已开启开机启动（下次开机自动后台运行）' : '已关闭开机启动'); }
+      else toast('设置失败：' + (r?.error || '未知错误'));
+    } catch (e: any) { toast('设置失败：' + (e?.message || e)); }
+  };
+
   return (
     <div>
       <h1>设置</h1>
-      <p className="lead">端口修改后需重启应用生效。</p>
+      <p className="lead">勾选项与下拉框即时生效；输入框修改后自动保存，端口修改需重启应用。</p>
 
-      <Card>
-        <h3 style={{ marginTop: 0 }}>端口</h3>
-        <div className="row">
-          <Field label="代理端口（客户端接入）"><input type="number" value={s.proxyPort} onChange={(e) => setS({ ...s, proxyPort: +e.target.value })} /></Field>
-          <Field label="管理端口（Web Admin）"><input type="number" value={s.adminPort} onChange={(e) => setS({ ...s, adminPort: +e.target.value })} /></Field>
-        </div>
-        <div className="flex gap8">
-          <button className="btn secondary sm" onClick={() => save({ proxyPort: s.proxyPort })}>保存端口</button>
-        </div>
+      <Card style={{ padding: '4px 18px' }}>
+        <Row label="外观" desc="浅色 / 深色 / 跟随系统">
+          <select value={s.theme} onChange={(e) => save({ theme: e.target.value })} className="set-ctl">
+            <option value="light">浅色</option><option value="dark">深色</option><option value="auto">跟随系统</option>
+          </select>
+        </Row>
+
+        <Row label="排序模式" desc="上游候选的挑选顺序">
+          <select value={s.orderMode} onChange={(e) => save({ orderMode: e.target.value })} className="set-ctl">
+            <option value="custom">自定义优先级</option><option value="newest">最新优先</option><option value="fastest">最快优先</option>
+          </select>
+        </Row>
+
+        {isDesktop && (
+          <Row label="开机启动" desc="开机后自动在后台运行，仅显示托盘图标，不弹窗口">
+            <CheckBox checked={autoLaunch} onChange={toggleAutoLaunch} />
+          </Row>
+        )}
+
+        <Row label="强制客户端令牌" desc="开启后客户端请求必须携带 Access Key">
+          <CheckBox checked={s.enforceToken} onChange={(v) => save({ enforceToken: v })} />
+        </Row>
+
+        <Row label="Web Admin 管理口令" desc="浏览器访问管理页时需要；留空则免登录">
+          <input value={s.adminToken} onChange={(e) => setS({ ...s, adminToken: e.target.value })} onBlur={() => save({ adminToken: s.adminToken })} placeholder="建议设置一个" className="set-ctl" style={{ maxWidth: 260 }} />
+        </Row>
+
+        <Row label="代理端口" desc="客户端接入端口，如 http://127.0.0.1:9090/v1">
+          <input type="number" value={s.proxyPort} onChange={(e) => setS({ ...s, proxyPort: +e.target.value })} onBlur={() => save({ proxyPort: s.proxyPort })} className="set-ctl num" />
+        </Row>
+
+        <Row label="管理端口" desc="Web Admin / 桌面界面端口">
+          <input type="number" value={s.adminPort} onChange={(e) => setS({ ...s, adminPort: +e.target.value })} onBlur={() => save({ adminPort: s.adminPort })} className="set-ctl num" />
+        </Row>
+
+        <Row label="接口重试" desc="上游返回可重试状态码时自动重试；429（欠费/限流）等无需重试的状态码请勿加入">
+          <CheckBox checked={s.retryEnabled !== false} onChange={(v) => save({ retryEnabled: v })} />
+        </Row>
+
+        {s.retryEnabled !== false && (
+          <>
+            <Row label="可重试的状态码" desc="逗号分隔，仅对这些状态码做同目标重试">
+              <input value={s.retryStatusCodes || ''} onChange={(e) => setS({ ...s, retryStatusCodes: e.target.value })} onBlur={() => save({ retryStatusCodes: s.retryStatusCodes })} placeholder="500, 502, 503, 504" className="set-ctl" style={{ maxWidth: 320 }} />
+            </Row>
+            <Row label="最大重试次数" desc="同一上游目标最多原地重试的次数">
+              <input type="number" min={0} max={10} value={s.maxRetries ?? 3} onChange={(e) => setS({ ...s, maxRetries: +e.target.value })} onBlur={() => save({ maxRetries: s.maxRetries })} className="set-ctl num" />
+            </Row>
+            <Row label="重试间隔" desc="两次重试之间的等待时间">
+              <div className="flex center gap8">
+                <input type="number" min={0} max={60} value={s.retryIntervalSec ?? 2} onChange={(e) => setS({ ...s, retryIntervalSec: +e.target.value })} onBlur={() => save({ retryIntervalSec: s.retryIntervalSec })} className="set-ctl num" style={{ width: 110 }} />
+                <span className="muted">秒</span>
+              </div>
+            </Row>
+          </>
+        )}
+
+        <Row label="模型冷却时长" desc="请求失败后该模型暂停参与路由的时间">
+          <div className="flex center gap8">
+            <input type="number" value={s.cooldownMs} onChange={(e) => setS({ ...s, cooldownMs: +e.target.value })} onBlur={() => save({ cooldownMs: s.cooldownMs })} className="set-ctl num" style={{ width: 130 }} />
+            <span className="muted">ms</span>
+          </div>
+        </Row>
+
+        <Row label="熔断阈值" desc="连续失败达到该次数后打开熔断" borderBottom={false}>
+          <input type="number" value={s.breakerThreshold} onChange={(e) => setS({ ...s, breakerThreshold: +e.target.value })} onBlur={() => save({ breakerThreshold: s.breakerThreshold })} className="set-ctl num" />
+        </Row>
       </Card>
 
-      <Card className="mt16">
-        <h3 style={{ marginTop: 0 }}>安全</h3>
-        <div className="flex between center mt8">
-          <div><div>强制客户端令牌</div><div className="muted" style={{ fontSize: 12 }}>开启后客户端必须带 Access Key</div></div>
-          <Switch checked={s.enforceToken} onChange={(v) => save({ enforceToken: v })} />
-        </div>
-        <Field label="Web Admin 管理口令" hint="留空则浏览器访问也无需登录"><input value={s.adminToken} onChange={(e) => setS({ ...s, adminToken: e.target.value })} placeholder="建议设置一个" /></Field>
-        <button className="btn secondary sm" onClick={() => save({ adminToken: s.adminToken })}>保存口令</button>
+      <Card className="mt16" style={{ padding: '4px 18px' }}>
+        <Row label="空流保护超时" desc="上游 200 但迟迟不出字，判定失败并切换">
+          <div className="flex center gap8">
+            <input type="number" value={s.emptyStreamTimeoutMs} onChange={(e) => setS({ ...s, emptyStreamTimeoutMs: +e.target.value })} onBlur={() => save({ emptyStreamTimeoutMs: s.emptyStreamTimeoutMs })} className="set-ctl num" style={{ width: 130 }} />
+            <span className="muted">ms</span>
+          </div>
+        </Row>
+        <Row label="熔断半开" desc="熔断后多久进入半开探测">
+          <div className="flex center gap8">
+            <input type="number" value={s.breakerResetMs} onChange={(e) => setS({ ...s, breakerResetMs: +e.target.value })} onBlur={() => save({ breakerResetMs: s.breakerResetMs })} className="set-ctl num" style={{ width: 130 }} />
+            <span className="muted">ms</span>
+          </div>
+        </Row>
+        <Row label="频道冻结" desc="空流触发后整个频道暂停的时间">
+          <div className="flex center gap8">
+            <input type="number" value={s.channelFreezeMs} onChange={(e) => setS({ ...s, channelFreezeMs: +e.target.value })} onBlur={() => save({ channelFreezeMs: s.channelFreezeMs })} className="set-ctl num" style={{ width: 130 }} />
+            <span className="muted">ms</span>
+          </div>
+        </Row>
+        <Row label="日志上限（大小）" desc="超出后自动滚动截断，只保留最近部分">
+          <div className="flex center gap8">
+            <input type="number" value={s.logCapBytes} onChange={(e) => setS({ ...s, logCapBytes: +e.target.value })} onBlur={() => save({ logCapBytes: s.logCapBytes })} className="set-ctl num" style={{ width: 130 }} />
+            <span className="muted">字节（当前约 {fmtBytes(s.logCapBytes)}）</span>
+          </div>
+        </Row>
+        <Row label="日志上限（行数）" desc="滚动截断时保留的行数" borderBottom={false}>
+          <input type="number" value={s.logCapLines} onChange={(e) => setS({ ...s, logCapLines: +e.target.value })} onBlur={() => save({ logCapLines: s.logCapLines })} className="set-ctl num" />
+        </Row>
       </Card>
-
-      <Card className="mt16">
-        <h3 style={{ marginTop: 0 }}>容错参数</h3>
-        <div className="row">
-          <Field label="模型冷却时长(ms)"><input type="number" value={s.cooldownMs} onChange={(e) => setS({ ...s, cooldownMs: +e.target.value })} /></Field>
-          <Field label="熔断阈值(次)"><input type="number" value={s.breakerThreshold} onChange={(e) => setS({ ...s, breakerThreshold: +e.target.value })} /></Field>
-        </div>
-        <div className="row">
-          <Field label="熔断半开(ms)"><input type="number" value={s.breakerResetMs} onChange={(e) => setS({ ...s, breakerResetMs: +e.target.value })} /></Field>
-          <Field label="频道冻结(ms)"><input type="number" value={s.channelFreezeMs} onChange={(e) => setS({ ...s, channelFreezeMs: +e.target.value })} /></Field>
-        </div>
-        <Field label="空流保护超时(ms)" hint="上游 200 但迟迟不出字，判定失败并切换"><input type="number" value={s.emptyStreamTimeoutMs} onChange={(e) => setS({ ...s, emptyStreamTimeoutMs: +e.target.value })} /></Field>
-        <button className="btn secondary sm" onClick={() => save({ cooldownMs: s.cooldownMs, breakerThreshold: s.breakerThreshold, breakerResetMs: s.breakerResetMs, channelFreezeMs: s.channelFreezeMs, emptyStreamTimeoutMs: s.emptyStreamTimeoutMs })}>保存容错参数</button>
-      </Card>
-
-      <Card className="mt16">
-        <h3 style={{ marginTop: 0 }}>日志与外观</h3>
-        <div className="row">
-          <Field label="日志上限(字节)"><input type="number" value={s.logCapBytes} onChange={(e) => setS({ ...s, logCapBytes: +e.target.value })} /></Field>
-          <Field label="日志上限(行)"><input type="number" value={s.logCapLines} onChange={(e) => setS({ ...s, logCapLines: +e.target.value })} /></Field>
-        </div>
-        <div className="row">
-          <Field label="主题">
-            <select value={s.theme} onChange={(e) => setS({ ...s, theme: e.target.value as any })}>
-              <option value="light">浅色</option><option value="dark">深色</option><option value="auto">跟随系统</option>
-            </select>
-          </Field>
-          <Field label="排序模式">
-            <select value={s.orderMode} onChange={(e) => setS({ ...s, orderMode: e.target.value as any })}>
-              <option value="custom">自定义优先级</option><option value="newest">最新优先</option><option value="fastest">最快优先</option>
-            </select>
-          </Field>
-        </div>
-        <div className="flex gap8">
-          <button className="btn secondary sm" onClick={() => save({ logCapBytes: s.logCapBytes, logCapLines: s.logCapLines })}>保存日志上限</button>
-          <button className="btn sm" onClick={() => save({ theme: s.theme, orderMode: s.orderMode })}>保存外观</button>
-        </div>
-      </Card>
-      <p className="muted mt16">当前日志上限约 {fmtBytes(s.logCapBytes)}，相比原版动辄 30G 的整库备份，从设计上已杜绝膨胀。</p>
     </div>
   );
 }

@@ -128,19 +128,6 @@ export function createAdminApp({ store, resilience, router, logstore, session, d
   app.get('/api/logs/stats', (req, res) => res.json(logstore.stats()));
   app.delete('/api/logs', (req, res) => { logstore.clear(); res.json({ ok: true }); });
 
-  // ---- App 连接器：生成常见 AI 工具的配置片段 ----
-  app.get('/api/connectors/:tool', (req, res) => {
-    const proxy = `http://127.0.0.1:${store.settings.proxyPort}`;
-    const tool = req.params.tool;
-    const snippets = {
-      claude: { env: { ANTHROPIC_BASE_URL: `${proxy}/v1`, ANTHROPIC_AUTH_TOKEN: 'any' }, note: '把 ANTHROPIC_BASE_URL 指向网关的 /v1（Claude Messages 端点）。' },
-      opencode: { config: { provider: { base_url: `${proxy}/v1`, api_key: 'any' } }, note: 'OpenCode 的 provider.base_url 指向网关 /v1。' },
-      codex: { env: { OPENAI_BASE_URL: `${proxy}/v1`, OPENAI_API_KEY: 'any' }, note: 'Codex 用 OPENAI_BASE_URL 指向网关 /v1。' },
-      zed: { config: { "language_models": { "openai": { "api_url": `${proxy}/v1`, "available_models": ["auto"] } } }, note: 'Zed 设置里把 openai.api_url 指向网关 /v1。' },
-    };
-    res.json(snippets[tool] || { error: 'unknown tool', supported: Object.keys(snippets) });
-  });
-
   // ---- 静态托管前端（Web Admin）----
   const distDir = path.join(import.meta.dirname, '..', '..', 'dist');
   if (fs.existsSync(distDir)) {

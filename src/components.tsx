@@ -70,14 +70,50 @@ export function TitleBar({ title }: { title: string }) {
   );
 }
 
+// ---------------- 错误边界 ----------------
+// 单个页面渲染出错时兜住异常，避免整屏白（只影响当前页，侧边栏仍可切换）。
+export class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { err: Error | null }
+> {
+  constructor(props: any) {
+    super(props);
+    this.state = { err: null };
+  }
+  static getDerivedStateFromError(err: Error) { return { err }; }
+  componentDidCatch(err: Error, info: any) {
+    // 打印到渲染层控制台，便于在 Electron DevTools 里定位
+    console.error('[玄枢] 页面渲染异常', err, info);
+  }
+  render() {
+    if (this.state.err) {
+      return (
+        <div className="card" style={{ padding: 24 }}>
+          <h3 style={{ marginTop: 0 }}>这个页面出错了</h3>
+          <p className="muted">其他页面仍可正常使用。以下是错误信息，可反馈给开发者：</p>
+          <div className="code mt8" style={{ whiteSpace: 'pre-wrap' }}>
+            {String(this.state.err?.message || this.state.err)}
+            {'\n\n'}
+            {String(this.state.err?.stack || '').split('\n').slice(0, 6).join('\n')}
+          </div>
+          <div className="modal-actions">
+            <button className="btn secondary" onClick={() => this.setState({ err: null })}>重试</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // ---------------- 侧边栏 ----------------
 const ICONS: Record<string, string> = {
-  Dashboard: '📊', Channels: '🔌', Models: '🧩', Tokens: '🔑', Logs: '📜', Connectors: '🔗', Settings: '⚙️',
+  Dashboard: '📊', Channels: '🔌', Models: '🧩', Tokens: '🔑', Logs: '📜', Stats: '📈', Settings: '⚙️',
 };
 export function Sidebar({ active, onNav }: { active: string; onNav: (k: string) => void }) {
-  const items = ['Dashboard', 'Channels', 'Models', 'Tokens', 'Logs', 'Connectors', 'Settings'];
+  const items = ['Dashboard', 'Channels', 'Models', 'Tokens', 'Logs', 'Stats', 'Settings'];
   const labels: Record<string, string> = {
-    Dashboard: '仪表盘', Channels: '频道', Models: '模型池', Tokens: '令牌', Logs: '日志', Connectors: '连接器', Settings: '设置',
+    Dashboard: '仪表盘', Channels: '频道', Models: '模型池', Tokens: '令牌', Logs: '日志', Stats: '统计', Settings: '设置',
   };
   return (
     <div className="sidebar">

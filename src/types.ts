@@ -63,6 +63,11 @@ export interface Settings {
   adminToken: string;
   orderMode: 'custom' | 'newest' | 'fastest';
   autoGroup: string;
+  autoLaunch: boolean;
+  retryEnabled: boolean;
+  retryStatusCodes: string;
+  maxRetries: number;
+  retryIntervalSec: number;
 }
 
 export interface State {

@@ -1,17 +1,23 @@
 import React, { useEffect, useState } from 'react';
-import { ToastProvider, TitleBar, Sidebar, Card, applyTheme } from './components';
+import { ToastProvider, TitleBar, Sidebar, Card, ErrorBoundary, applyTheme } from './components';
 import { api } from './api';
 import type { State } from './types';
-import { Dashboard, Channels, Models, Tokens, Logs, Connectors, Settings } from './pages';
+import { Dashboard, Channels, Models, Tokens, Logs, Stats, Settings } from './pages';
 
 const TITLES: Record<string, string> = {
   Dashboard: '仪表盘', Channels: '频道管理', Models: '模型池', Tokens: '客户端令牌',
-  Logs: '请求日志', Connectors: 'App 连接器', Settings: '设置',
+  Logs: '请求日志', Stats: '统计', Settings: '设置',
 };
 
 export default function App() {
   const [state, setState] = useState<State | null>(null);
-  const [page, setPage] = useState('Dashboard');
+  // 支持 ?page= 直达某页（Web Admin 收藏/分享用），如 /?page=Stats
+  const [page, setPage] = useState(() => {
+    try {
+      const p = new URLSearchParams(window.location.search).get('page') || 'Dashboard';
+      return ['Dashboard', 'Channels', 'Models', 'Tokens', 'Logs', 'Stats', 'Settings'].includes(p) ? p : 'Dashboard';
+    } catch { return 'Dashboard'; }
+  });
   const [loading, setLoading] = useState(true);
   const [needLogin, setNeedLogin] = useState(false);
 
@@ -56,7 +62,9 @@ export default function App() {
           <div className="content">
             {loading && <div className="empty">加载中…</div>}
             {!loading && state && (
-              <Inner page={page} state={state} refresh={load} setState={setState} />
+              <ErrorBoundary key={page}>
+                <Inner page={page} state={state} refresh={load} setState={setState} />
+              </ErrorBoundary>
             )}
           </div>
         </div>
@@ -65,14 +73,13 @@ export default function App() {
   );
 }
 
-function Inner({ page, state, refresh, setState }: { page: string; state: State; refresh: () => void; setState: any }) {
-  const props = { state, refresh, setState };
+function Inner({ page, state, refresh, setState }: { page: string; state: State; refresh: () => void; setState: any }) {  const props = { state, refresh, setState };
   switch (page) {
     case 'Channels': return <Channels {...props} />;
     case 'Models': return <Models {...props} />;
     case 'Tokens': return <Tokens {...props} />;
     case 'Logs': return <Logs {...props} />;
-    case 'Connectors': return <Connectors {...props} />;
+    case 'Stats': return <Stats {...props} />;
     case 'Settings': return <Settings {...props} />;
     default: return <Dashboard {...props} />;
   }

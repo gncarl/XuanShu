@@ -32,6 +32,11 @@ export const DEFAULT_SETTINGS = {
   webAdminEnabled: true,
   adminToken: '',
   autoGroup: 'AUTO',
+  autoLaunch: false,                    // 开机启动（桌面端）
+  retryEnabled: true,                   // 接口重试：上游返回可重试状态码时，同一目标自动重试
+  retryStatusCodes: '500,502,503,504',  // 可重试的状态码（429 欠费/限流不建议加入）
+  maxRetries: 3,                        // 同一目标最大重试次数
+  retryIntervalSec: 2,                  // 重试间隔（秒）
 };
 
 export const STORE_VERSION = 1;

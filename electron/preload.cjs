@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld('app', {
   close: () => ipcRenderer.invoke('window:close'),
   isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
   getPorts: () => ipcRenderer.invoke('app:ports'),
+  // 开机启动（桌面端专属，Web Admin 里没有 window.app）
+  setAutoLaunch: (enable) => ipcRenderer.invoke('app:setAutoLaunch', enable),
+  getAutoLaunch: () => ipcRenderer.invoke('app:getAutoLaunch'),
   // 主进程在最大化/还原时通知渲染层，便于切换按钮图标
   onMaximizeChanged: (cb) => {
     const handler = (_e, v) => cb(!!v);
