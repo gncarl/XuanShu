@@ -5,6 +5,24 @@
 
 ---
 
+## [0.2.2] - 2026-10-02
+
+### 修复
+
+- **修复长任务 / 推理模型「链接中断」**：原 `proxy.js` 写死上游空闲 60 秒即强制销毁连接，推理模型（o 系列 / Claude thinking / deepseek-reasoner 等）在长思考静默期常超 60 秒被腰斩，agent 侧表现为 `connection reset` / 链接中断。现改为可配置的 `streamIdleTimeoutMs`（默认 10 分钟，仅兜底僵尸连接）。
+- **放宽首 token 等待**：空流保护阈值由 8 秒放宽至 60 秒（`emptyStreamTimeoutMs` 默认值 8s → 60s），推理模型首 token 不再被误判无响应而腰斩。
+
+### 优化
+
+- **AUTO 负缓存**：AUTO 回退时，若某 (频道, 模型) 返回「模型不存在」类 4xx（400/404/422 等，排除鉴权 401/403、额度 402、限流 429），自动短期（默认 10 分钟，可配置 `negativeCacheMs`）跳过该候选，不再每次请求都把每个组合试一遍。显著降低无效请求数与回退延迟，并消除旧逻辑中「4xx 冷却 5 分钟过期→再试→再 4xx」的循环（日志里大量 `402/400/422` 即源于此）。
+
+### 说明
+
+- 若你已安装 0.2.1 或 0.2.2 早期包，并遇到「链接中断 / connection reset」或频繁 4xx 重试，直接覆盖安装当前 0.2.2 即可，配置与数据不受影响（数据仍在 `%APPDATA%\ai-gateway\ai-gateway-data\`）。
+- 本版为 0.2.2 的增量更新，**版本号不变**（仍为 0.2.2），但安装包已重新生成。
+
+---
+
 ## [0.2.1] - 2026-10-01
 
 ### 修复
@@ -65,6 +83,7 @@
 
 ---
 
+[0.2.2]: https://github.com/gncarl/XuanShu/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/gncarl/XuanShu/compare/v0.1.6...v0.2.1
 [0.2.0]: https://github.com/gncarl/XuanShu/releases/tag/v0.2.0
 [0.1.6]: https://github.com/gncarl/XuanShu/releases/tag/v0.1.6

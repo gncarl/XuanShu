@@ -24,7 +24,8 @@ export const DEFAULT_SETTINGS = {
   breakerThreshold: 5,             // L2：连续失败多少次打开熔断
   breakerResetMs: 60 * 1000,       // L2：多久后进入半开探测
   channelFreezeMs: 10 * 60 * 1000, // L3：频道整体冻结时长
-  emptyStreamTimeoutMs: 8000,      // 空流保护：多久没数据视为失败
+  emptyStreamTimeoutMs: 60000,     // 空流保护：首个 token 多久没来才视为上游无响应（推理模型首 token 常超 8s，故放宽到 60s）
+  streamIdleTimeoutMs: 600000,     // 流已开始后，两次数据之间的空闲上限，仅用于兜底「僵尸连接」；不短设，避免长思考被掐断
   logCapBytes: 50 * 1024 * 1024,   // 日志上限 50MB（取代 30G 备份）
   logCapLines: 200000,
   theme: 'light',
@@ -37,6 +38,7 @@ export const DEFAULT_SETTINGS = {
   retryStatusCodes: '500,502,503,504',  // 可重试的状态码（429 欠费/限流不建议加入）
   maxRetries: 3,                        // 同一目标最大重试次数
   retryIntervalSec: 2,                  // 重试间隔（秒）
+  negativeCacheMs: 600000,             // AUTO 负缓存：命中「模型不存在」类 4xx 后短期跳过该候选（0=禁用），默认 10 分钟
 };
 
 export const STORE_VERSION = 1;

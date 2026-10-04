@@ -53,8 +53,30 @@ const mock = http.createServer((req, res) => {
       return res.end();
     }
     if (url.includes('/chat/completions')) {
+      if (model === 'missing-model') return end(res, 404, { error: 'model not found' });
       if (model === 'fail-model') return end(res, 500, { error: 'upstream boom' });
       if (model === 'empty-model') { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); return res.end(); } // 空流
+      if (model === 'slow-first') {
+        // 首 token 延迟 12s：复现「推理模型慢思考被旧 8s 空流保护腰斩」的回归
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        setTimeout(() => {
+          res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { content: 'hi-from-openai:slow-first' } }] }) + '\n\n');
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }, 12000);
+        return;
+      }
+      if (model === 'pauses') {
+        // 首 token 立即返回，再静默 6s 才出第二段 —— 验证流中空闲不会被误杀
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { content: 'part1' } }] }) + '\n\n');
+        setTimeout(() => {
+          res.write('data: ' + JSON.stringify({ choices: [{ index: 0, delta: { content: 'part2' } }] }) + '\n\n');
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }, 6000);
+        return;
+      }
       if (!json.stream) {
         return end(res, 200, { id: '1', object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: 'hi-from-openai:' + model } }], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } });
       }
@@ -208,6 +230,33 @@ async function main() {
   const chPlain = store.addChannel({ name: 'base-plain', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
   const fmPlain = await fetchChannelModels(chPlain);
   check('T14c 不带版本段的 Base URL 自动补 /v1', fmPlain.ok && recorded.includes('/v1/models'), `requested=${recorded.join(',')} ok=${fmPlain.ok}`);
+
+  // ---------- T15/T16 慢思考 / 流中静置 不被腰斩（回归：旧 8s 空流保护 + 写死的 60s 空闲超时）----------
+  const chSlow = store.addChannel({ name: 'mock-slow', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  store.addModel({ name: 'slow-first', channelId: chSlow.id, upstreamModel: 'slow-first', group: 'AUTO', enabled: true });
+  store.addModel({ name: 'pauses', channelId: chSlow.id, upstreamModel: 'pauses', group: 'AUTO', enabled: true });
+
+  // T15 首 token 延迟 12s（>旧 8s 阈值，<新 60s 阈值）→ 必须成功。旧实现会返回 502
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'slow-first', stream: true, messages: [{ role: 'user', content: 'hi' }] });
+  check('T15 慢首 token(12s) 不被空流保护腰斩', r.status === 200 && r.body.includes('slow-first') && r.body.includes('[DONE]'), `status=${r.status} len=${r.body.length}`);
+
+  // T16 流中段静默 6s（远小于 600s 空闲上限）→ 必须完整收到 part2 与 [DONE]
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'pauses', stream: true, messages: [{ role: 'user', content: 'hi' }] });
+  check('T16 流中静置(6s) 不被空闲超时掐断', r.status === 200 && r.body.includes('part2') && r.body.includes('[DONE]'), `status=${r.status} body=${r.body.slice(0, 160)}`);
+
+  // ---------- T17 AUTO 负缓存：模型不存在(404)后短期跳过，不再重试 ----------
+  store.data.channels = []; store.data.models = [];
+  const chMissing = store.addChannel({ name: 'mock-missing', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  const missModel = store.addModel({ name: 'missing-x', channelId: chMissing.id, upstreamModel: 'missing-model', group: 'AUTO', enabled: true });
+  recorded.length = 0;
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'AUTO', stream: false, messages: [{ role: 'user', content: 'hi' }] });
+  const firstHit = recorded.some((u) => u.includes('/chat/completions'));
+  check('T17a AUTO 首次尝试缺失模型并 404→负缓存', r.status === 502 && firstHit, `status=${r.status} hitChat=${firstHit}`);
+  store.setModelCooldown(missModel.id, 0); // 清除冷却，让模型重回候选池，专测负缓存跳过
+  recorded.length = 0;
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'AUTO', stream: false, messages: [{ role: 'user', content: 'hi' }] });
+  const secondHit = recorded.some((u) => u.includes('/chat/completions'));
+  check('T17b 负缓存命中：第二次 AUTO 不再向该上游发请求', r.status === 502 && !secondHit, `status=${r.status} hitChat=${secondHit}`);
 
   const failed = results.filter((x) => !x.ok).length;
   console.log(`\n结果：${results.length - failed}/${results.length} 通过`);
