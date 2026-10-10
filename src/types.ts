@@ -71,6 +71,7 @@ export interface Settings {
 }
 
 export interface State {
+  version?: string;
   settings: Settings;
   channels: Channel[];
   models: ModelEntry[];

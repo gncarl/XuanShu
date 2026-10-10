@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { startBackend } from './backend/index.js';
@@ -81,6 +81,22 @@ function setupIpc() {
   ipcMain.handle('window:isMaximized', () => mainWindow?.isMaximized() ?? false);
   ipcMain.handle('app:ports', () => ports);
 
+  // 版本号（「关于」面板显示；打包后即 package.json 里的 version）
+  ipcMain.handle('app:version', () => app.getVersion());
+
+  // 用系统默认浏览器打开外链（GitHub 仓库 / 发布页等）。
+  // 只放行 http/https，避免被构造成 file:// 之类的本地协议。
+  ipcMain.handle('app:openExternal', (_e, url) => {
+    try {
+      const u = new URL(String(url));
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return { ok: false, error: 'unsupported protocol' };
+      shell.openExternal(u.toString());
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  });
+
   // 开机启动：打包后注册 exe 本身；开发模式下 Electron 没有独立 exe 可注册，直接返回 false。
   // 附带 --hidden 参数，开机自启时不弹窗口、只进托盘。
   ipcMain.handle('app:setAutoLaunch', (_e, enable) => {
@@ -162,7 +178,7 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     try {
       const dataDir = path.join(app.getPath('userData'), 'ai-gateway-data');
-      ports = await startBackend({ isDesktop: true, dataDir });
+      ports = await startBackend({ isDesktop: true, dataDir, version: app.getVersion() });
       setupIpc();
       // 开机自启（--hidden）或手动以 --hidden 启动时不弹窗口，只进托盘
       if (!process.argv.includes('--hidden')) createWindow();

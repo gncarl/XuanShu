@@ -3,11 +3,19 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { probeChannel, fetchChannelModels } from './channels.js';
+import { buildExport, applyImport } from './configIO.js';
+import { compareVersion } from './util.js';
 import { PROTOCOL_LABELS, PROTOCOLS } from './types.js';
 
-export function createAdminApp({ store, resilience, router, logstore, session, desktopMode }) {
+// 项目主页 / 发布页（「关于」面板与「检查更新」用）
+const REPO_URL = 'https://github.com/gncarl/XuanShu';
+const RELEASES_URL = `${REPO_URL}/releases`;
+const LATEST_RELEASE_API = 'https://api.github.com/repos/gncarl/XuanShu/releases/latest';
+
+export function createAdminApp({ store, resilience, router, logstore, session, desktopMode, version = '' }) {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  // 配置导入可能是个较大的 JSON，放宽到 8mb
+  app.use(express.json({ limit: '8mb' }));
 
   // 鉴权中间件（桌面端免登录；headless/web-admin 若设了 adminToken 则需登录）
   app.use((req, res, next) => {
@@ -30,6 +38,7 @@ export function createAdminApp({ store, resilience, router, logstore, session, d
   // 一次性把面板所需状态全部拉回
   app.get('/api/state', (req, res) => {
     res.json({
+      version,
       settings: store.settings,
       channels: store.listChannels(),
       models: store.listModels(),
@@ -38,6 +47,70 @@ export function createAdminApp({ store, resilience, router, logstore, session, d
       tokens: store.listTokens(),
       protocolLabels: PROTOCOL_LABELS,
     });
+  });
+
+  // ---- 关于 / 检查更新 ----
+  app.get('/api/about', (req, res) => {
+    res.json({
+      app: '玄枢',
+      name: 'XuanShu',
+      version,
+      repo: REPO_URL,
+      releases: RELEASES_URL,
+      latestReleaseApi: LATEST_RELEASE_API,
+    });
+  });
+
+  // 检查更新：查 GitHub 最近一个已发布的 Release，和本地版本比大小。
+  app.get('/api/check-update', async (req, res) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      let r;
+      try {
+        r = await fetch(LATEST_RELEASE_API, {
+          signal: ctrl.signal,
+          headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'XuanShu-Gateway' },
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (r.status === 404) {
+        return res.json({ ok: true, current: version, latest: version, hasUpdate: false, note: '仓库暂无已发布的 Release。' });
+      }
+      if (!r.ok) return res.json({ ok: false, error: `GitHub API 返回 HTTP ${r.status}` });
+      const j = await r.json();
+      const tag = String(j.tag_name || '');
+      const latest = tag.replace(/^v/i, '');
+      res.json({
+        ok: true,
+        current: version,
+        latest,
+        tag,
+        hasUpdate: !!(latest && compareVersion(version, latest) < 0),
+        url: j.html_url || RELEASES_URL,
+        name: j.name || tag,
+        publishedAt: j.published_at || null,
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      const aborted = e?.name === 'AbortError';
+      res.json({ ok: false, error: aborted ? '检查超时：网络不通或需要代理' : String(e?.message || e) });
+    }
+  });
+
+  // ---- 配置导出 / 导入 ----
+  app.get('/api/config/export', (req, res) => {
+    res.json(buildExport(store, { version }));
+  });
+  app.post('/api/config/import', (req, res) => {
+    try {
+      const result = applyImport(store, req.body);
+      if (!result.ok) return res.status(400).json(result);
+      res.json(result);
+    } catch (e) {
+      res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
   });
 
   app.put('/api/settings', (req, res) => {

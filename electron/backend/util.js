@@ -82,3 +82,27 @@ export function makeLineSplitter(onLine) {
 export function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
+
+// 比较两段版本号（形如 "0.2.3" / "v0.2.3" / "0.2.3-beta.1"）。
+// 返回 -1 / 0 / 1。缺省的段按 0 处理；预发布标识（-xxx）视为比正式版小。
+export function compareVersion(a, b) {
+  const norm = (s) => String(s || '').trim().replace(/^v/i, '');
+  const parse = (s) => {
+    const [core, pre = ''] = norm(s).split('-');
+    const nums = core.split('.').map((x) => parseInt(x, 10) || 0);
+    return { nums, pre };
+  };
+  const A = parse(a);
+  const B = parse(b);
+  const n = Math.max(A.nums.length, B.nums.length);
+  for (let i = 0; i < n; i++) {
+    const x = A.nums[i] || 0;
+    const y = B.nums[i] || 0;
+    if (x !== y) return x > y ? 1 : -1;
+  }
+  // 数字段相同：无预发布标识的更大
+  if (!A.pre && B.pre) return 1;
+  if (A.pre && !B.pre) return -1;
+  if (A.pre === B.pre) return 0;
+  return A.pre > B.pre ? 1 : -1;
+}

@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { ToastProvider, TitleBar, Sidebar, Card, ErrorBoundary, applyTheme } from './components';
+import { ToastProvider, TitleBar, Sidebar, Card, ErrorBoundary, applyTheme, PAGES } from './components';
 import { api } from './api';
 import type { State } from './types';
-import { Dashboard, Channels, Models, Tokens, Logs, Stats, Settings } from './pages';
+import { Dashboard, Channels, Models, Tokens, Logs, Stats, Settings, About } from './pages';
 
 const TITLES: Record<string, string> = {
   Dashboard: '仪表盘', Channels: '频道管理', Models: '模型池', Tokens: '客户端令牌',
-  Logs: '请求日志', Stats: '统计', Settings: '设置',
+  Logs: '请求日志', Stats: '统计', Settings: '设置', About: '关于',
 };
 
 export default function App() {
@@ -15,7 +15,7 @@ export default function App() {
   const [page, setPage] = useState(() => {
     try {
       const p = new URLSearchParams(window.location.search).get('page') || 'Dashboard';
-      return ['Dashboard', 'Channels', 'Models', 'Tokens', 'Logs', 'Stats', 'Settings'].includes(p) ? p : 'Dashboard';
+      return PAGES.includes(p) ? p : 'Dashboard';
     } catch { return 'Dashboard'; }
   });
   const [loading, setLoading] = useState(true);
@@ -58,7 +58,7 @@ export default function App() {
       <div className="app">
         <TitleBar title="玄枢" />
         <div className="body">
-          <Sidebar active={page} onNav={setPage} />
+          <Sidebar active={page} onNav={setPage} version={state?.version} />
           <div className="content">
             {loading && <div className="empty">加载中…</div>}
             {!loading && state && (
@@ -81,6 +81,7 @@ function Inner({ page, state, refresh, setState }: { page: string; state: State;
     case 'Logs': return <Logs {...props} />;
     case 'Stats': return <Stats {...props} />;
     case 'Settings': return <Settings {...props} />;
+    case 'About': return <About {...props} />;
     default: return <Dashboard {...props} />;
   }
 }

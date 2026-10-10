@@ -130,7 +130,7 @@ tbody tr:hover { background: var(--panel-2); }
 tr:last-child td { border-bottom: none; }
 
 /* ---------- 徽标/开关 ---------- */
-.badge { display: inline-block; padding: 2px 9px; border-radius: 980px; font-size: 11px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
+.badge { display: inline-block; padding: 2px 9px; border-radius: 980px; font-size: 11px; font-weight: 600; background: var(--accent-soft); color: var(--accent); white-space: nowrap; line-height: 1.7; vertical-align: middle; }
 .badge.gray { background: #e3e3e6; color: var(--text-2); }
 .badge.green { background: #e3f9ea; color: var(--green); }
 .badge.red { background: #ffeceb; color: var(--red); }
@@ -265,3 +265,64 @@ tr:last-child td { border-bottom: none; }
 .stat-nums { display: flex; align-items: center; gap: 14px; }
 .stat-nums b.accent { font-size: 14px; }
 .stat-nums .muted { font-size: 12.5px; }
+
+/* ---------- 表格行内操作 ---------- */
+/* 探测列：按钮与结果徽标同一行，不换行、不堆叠 */
+.probe-cell { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; white-space: nowrap; }
+
+/* 图标按钮（垃圾桶等）：方形、hover 变红 */
+.btn.icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0; border-radius: 8px;
+  background: transparent; border: 1px solid transparent; color: var(--text-3);
+}
+.btn.icon:hover { background: var(--panel-2); color: var(--text); }
+.btn.icon.danger:hover { background: #ffeceb; color: var(--red); border-color: #ffd6d3; }
+[data-theme="dark"] .btn.icon.danger:hover { background: #3a2323; border-color: #5a2f2c; }
+
+/* ---------- 额外请求头编辑器 ---------- */
+.hdr-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.hdr-row .hdr-k { flex: 0 0 42%; }
+.hdr-row .hdr-v { flex: 1; }
+.hdr-row input { padding: 7px 10px; font-size: 12.5px; }
+.hdr-row .btn.icon { flex-shrink: 0; }
+
+/* ---------- 行内错误提示 ---------- */
+.inline-error {
+  border: 1px solid #ffd6d3; background: #fff5f4; color: var(--red);
+  border-radius: 10px; padding: 10px 12px; font-size: 12.5px; line-height: 1.6;
+}
+.inline-error strong { display: block; margin-bottom: 3px; }
+.inline-error.warn { border-color: #ffe0b0; background: #fffaf0; color: #b26a00; }
+[data-theme="dark"] .inline-error { background: #3a2323; border-color: #5a2f2c; }
+[data-theme="dark"] .inline-error.warn { background: #3a3223; border-color: #5c4a2a; color: #ffb74d; }
+.inline-error .hint { color: inherit; opacity: .85; }
+
+/* ---------- 关于页 ---------- */
+.about-card { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 7%, var(--panel)), var(--panel)); }
+.about-head { display: flex; align-items: center; gap: 16px; }
+.about-logo {
+  width: 56px; height: 56px; border-radius: 14px; flex-shrink: 0;
+  background: linear-gradient(135deg, #0071e3, #42a5f5); color: #fff;
+  display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 700;
+  box-shadow: 0 4px 14px rgba(0,113,227,.35);
+}
+.about-name { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 4px; }
+.about-ver { font-size: 13px; font-weight: 600; color: var(--accent); background: var(--accent-soft); padding: 2px 9px; border-radius: 980px; margin-left: 6px; vertical-align: middle; }
+.about-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.about-links .btn { display: inline-flex; align-items: center; gap: 6px; }
+.about-result {
+  margin-top: 14px; padding: 10px 14px; border-radius: 10px; font-size: 13px;
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--text-2);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.about-result.has { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--text); }
+.about-result b { color: var(--accent); }
+
+/* ---------- 键值列表 ---------- */
+.kv { display: flex; flex-direction: column; }
+.kv-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 11px 2px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+.kv-row:last-child { border-bottom: none; }
+.kv-row > span { color: var(--text-2); }
+.kv-row > b { font-weight: 600; word-break: break-all; text-align: right; }

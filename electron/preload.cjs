@@ -11,6 +11,10 @@ contextBridge.exposeInMainWorld('app', {
   close: () => ipcRenderer.invoke('window:close'),
   isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
   getPorts: () => ipcRenderer.invoke('app:ports'),
+  // 版本号（「关于」面板用）
+  version: () => ipcRenderer.invoke('app:version'),
+  // 用系统默认浏览器打开外链（GitHub 仓库 / 发布页）
+  openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
   // 开机启动（桌面端专属，Web Admin 里没有 window.app）
   setAutoLaunch: (enable) => ipcRenderer.invoke('app:setAutoLaunch', enable),
   getAutoLaunch: () => ipcRenderer.invoke('app:getAutoLaunch'),

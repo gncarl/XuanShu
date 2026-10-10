@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import type { State, Channel, ModelEntry, Token, RouteRule, RouteStrategy } from './types';
-import { Card, Modal, Switch, Field, Badge, KPI, Bar, useToast, applyTheme } from './components';
+import { Card, Modal, Switch, Field, Badge, KPI, Bar, useToast, applyTheme, IconTrash, IconExternal } from './components';
 
 function fmtBytes(b: number) {
   if (b < 1024) return b + ' B';
@@ -93,7 +93,30 @@ export function Dashboard({ state, refresh }: { state: State; refresh: () => voi
 
 // =================== Channels ===================
 type ChForm = Partial<Channel> & { id?: string };
-const emptyChannel = (): ChForm => ({ protocol: 'openai', enabled: true, priority: 100, name: '', baseUrl: '', apiKey: '' });
+const emptyChannel = (): ChForm => ({ protocol: 'openai', enabled: true, priority: 100, name: '', baseUrl: '', apiKey: '', extraHeaders: {} });
+
+// 额外请求头编辑器（键值对）。用于给「要求自定义转发密钥」的上游补 header。
+function ExtraHeadersEditor({ rows, onChange }: { rows: { k: string; v: string }[]; onChange: (r: { k: string; v: string }[]) => void }) {
+  const upd = (i: number, patch: Partial<{ k: string; v: string }>) =>
+    onChange(rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)));
+  return (
+    <div>
+      {rows.map((r, i) => (
+        <div key={i} className="hdr-row">
+          <input className="hdr-k" placeholder="请求头名称，如 x-forward-secret" value={r.k} onChange={(e) => upd(i, { k: e.target.value })} />
+          <input className="hdr-v" placeholder="值" value={r.v} onChange={(e) => upd(i, { v: e.target.value })} />
+          <button
+            type="button" className="btn icon danger" title="删除该请求头" aria-label="删除该请求头"
+            onClick={() => onChange(rows.filter((_, idx) => idx !== i))}
+          >
+            <IconTrash />
+          </button>
+        </div>
+      ))}
+      <button type="button" className="btn ghost sm" onClick={() => onChange([...rows, { k: '', v: '' }])}>+ 添加请求头</button>
+    </div>
+  );
+}
 
 export function Channels({ state, refresh }: { state: State; refresh: () => void }) {
   const toast = useToast();
@@ -106,6 +129,8 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
   const [picked, setPicked] = useState<Record<string, boolean>>({});
   const [filter, setFilter] = useState('');
   const [addGroup, setAddGroup] = useState(state.settings.autoGroup);
+  const [headerRows, setHeaderRows] = useState<{ k: string; v: string }[]>([]);
+  const [fetchError, setFetchError] = useState<any>(null);
   const pickRef = useRef<HTMLDivElement | null>(null);
 
   // 拉取完成后把结果列表滚进视野（弹窗比屏幕高时，否则要手动往下拉才看得到）
@@ -118,19 +143,29 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
 
   const openNew = () => {
     setForm(emptyChannel()); setFetched([]); setPicked({}); setFilter('');
+    setHeaderRows([]); setFetchError(null);
     setAddGroup(state.settings.autoGroup); setOpen(true);
   };
   const openEdit = (c: Channel) => {
     setForm({ ...c }); setFetched([]); setPicked({}); setFilter('');
+    setHeaderRows(Object.entries(c.extraHeaders || {}).map(([k, v]) => ({ k, v })));
+    setFetchError(null);
     setAddGroup(state.settings.autoGroup); setOpen(true);
   };
+
+  // 把「额外请求头」编辑行合并进表单（忽略空键）
+  const withHeaders = (f: ChForm): ChForm => ({
+    ...f,
+    extraHeaders: Object.fromEntries(headerRows.filter((h) => h.k.trim()).map((h) => [h.k.trim(), h.v])),
+  });
 
   // 保存表单（新建则创建），返回频道 id。
   // 拉取模型前先落库，否则用的还是旧的 baseUrl / apiKey。
   const persist = async (): Promise<string | null> => {
-    if (!form.name || !form.baseUrl) { toast('请先填写名称与 Base URL'); return null; }
-    if (form.id) { await api.updateChannel(form.id, form); await refresh(); return form.id; }
-    const c: any = await api.addChannel(form);
+    const payload = withHeaders(form);
+    if (!payload.name || !payload.baseUrl) { toast('请先填写名称与 Base URL'); return null; }
+    if (payload.id) { await api.updateChannel(payload.id, payload); await refresh(); return payload.id; }
+    const c: any = await api.addChannel(payload);
     setForm((f) => ({ ...f, id: c.id }));
     await refresh();
     return c.id;
@@ -138,16 +173,25 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
 
   const doProbe = async (id: string) => {
     setProbe((p) => ({ ...p, [id]: { loading: true } }));
-    const r = await api.probeChannel(id); setProbe((p) => ({ ...p, [id]: r }));
+    const r = await api.probeChannel(id);
+    setProbe((p) => ({ ...p, [id]: r }));
+    if (r && r.ok === false) {
+      toast(`探测失败：${r.error || '未知错误'}${r.hint ? '（' + r.hint + '）' : ''}`);
+    }
   };
 
   const doFetch = async () => {
     const id = await persist();
     if (!id) return;
     setBusy(true);
+    setFetchError(null);
     try {
       const r: any = await api.fetchModels(id);
-      if (!r.ok) { toast('拉取失败：' + (r.error || '未知错误')); return; }
+      if (!r.ok) {
+        setFetchError(r);
+        toast('拉取失败：' + (r.error || '未知错误'));
+        return;
+      }
       const uniq: string[] = Array.from(new Set(r.models as string[])).sort();
       const pool = new Set(state.models.filter((m) => m.channelId === id).map((m) => m.upstreamModel || m.name));
       const p: Record<string, boolean> = {};
@@ -223,15 +267,27 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
                   <td className="muted" style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.baseUrl}</td>
                   <td>{c.priority}</td>
                   <td><Switch checked={c.enabled} onChange={(v) => { api.updateChannel(c.id, { enabled: v }); refresh(); }} /></td>
-                  <td style={{ fontSize: 12 }}>
-                    <button className="btn ghost sm" onClick={() => doProbe(c.id)}>探测</button>{' '}
-                    {probe[c.id]?.loading && '…'}
-                    {probe[c.id]?.ok && <Badge kind="green">{probe[c.id].latencyMs}ms</Badge>}
-                    {probe[c.id] && probe[c.id].ok === false && <Badge kind="red">{probe[c.id].error}</Badge>}
+                  <td>
+                    <div className="probe-cell">
+                      <button className="btn ghost sm" onClick={() => doProbe(c.id)}>{probe[c.id]?.loading ? '探测中…' : '探测'}</button>
+                      {probe[c.id]?.ok && !probe[c.id]?.loading && <Badge kind="green">{probe[c.id].latencyMs}ms</Badge>}
+                      {probe[c.id] && probe[c.id].ok === false && !probe[c.id]?.loading && (
+                        <Badge kind={probe[c.id].authFail ? 'yellow' : 'red'} title={[probe[c.id].error, probe[c.id].hint].filter(Boolean).join(' ')}>
+                          {probe[c.id].authFail ? '鉴权失败' : '不通'}
+                        </Badge>
+                      )}
+                    </div>
                   </td>
-                  <td style={{ whiteSpace: 'nowrap' }}>
-                    <button className="btn ghost sm" onClick={() => openEdit(c)}>编辑 / 拉模型</button>{' '}
-                    <button className="btn ghost sm" onClick={() => { if (confirm('删除该频道及其模型？')) { api.deleteChannel(c.id); refresh(); } }}>删</button>
+                  <td>
+                    <div className="row-actions">
+                      <button className="btn ghost sm" onClick={() => openEdit(c)}>编辑 / 拉模型</button>
+                      <button
+                        className="btn icon danger" title="删除该频道及其模型" aria-label="删除频道"
+                        onClick={() => { if (confirm('删除该频道及其模型？')) { api.deleteChannel(c.id); refresh(); } }}
+                      >
+                        <IconTrash size={15} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               );
@@ -264,6 +320,17 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
             <Field label="启用"><div className="mt8"><Switch checked={!!form.enabled} onChange={(v) => setForm({ ...form, enabled: v })} /></div></Field>
           </div>
 
+          <div className="mt16">
+            <strong style={{ fontSize: 13 }}>额外请求头（可选）</strong>
+            <div className="hint" style={{ marginTop: 2 }}>
+              部分中转站（如 Modal、One API 系）要求额外的转发密钥头。只填 Authorization 会返回 401「missing forward secret」，
+              在下面补上该站点要求的请求头即可正常探测与拉取模型。
+            </div>
+            <div className="mt8">
+              <ExtraHeadersEditor rows={headerRows} onChange={setHeaderRows} />
+            </div>
+          </div>
+
           <div className="mt16" style={{ borderTop: '1px solid var(--border)', paddingTop: 16 }}>
             <div className="flex between center">
               <div>
@@ -272,6 +339,14 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
               </div>
               <button className="btn secondary sm" disabled={busy} onClick={doFetch}>{busy ? '处理中…' : '拉取模型'}</button>
             </div>
+
+            {fetchError && (
+              <div className={`inline-error mt8 ${fetchError.authFail ? 'warn' : ''}`}>
+                <strong>{fetchError.authFail ? '鉴权失败，拉不到模型' : '拉取失败'}</strong>
+                <div>{fetchError.error}</div>
+                {fetchError.authFail && <div className="hint">可在上方「额外请求头」补上该中转站要求的转发密钥头，再点「拉取模型」重试。</div>}
+              </div>
+            )}
 
             {fetched.length > 0 && (
               <>
@@ -452,9 +527,11 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
                 <td><Badge kind="gray">{strategyShort(r.strategy)}</Badge></td>
                 <td className="muted" style={{ fontSize: 12, maxWidth: 380 }}>{targetSummary(r)}</td>
                 <td>{r.enabled ? <Badge kind="green">启用</Badge> : <Badge kind="gray">停用</Badge>}</td>
-                <td style={{ whiteSpace: 'nowrap' }}>
-                  <button className="btn ghost sm" onClick={() => openEditRoute(r)}>编辑</button>{' '}
-                  <button className="btn ghost sm" onClick={() => { if (confirm('删除该路由？')) { api.deleteRoute(r.id); refresh(); } }}>删</button>
+                <td>
+                  <div className="row-actions">
+                    <button className="btn ghost sm" onClick={() => openEditRoute(r)}>编辑</button>
+                    <button className="btn icon danger" title="删除该路由" aria-label="删除路由" onClick={() => { if (confirm('删除该路由？')) { api.deleteRoute(r.id); refresh(); } }}><IconTrash /></button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -491,9 +568,11 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
                     {m.enabled && !m.disabled && cooled && <Badge kind="yellow">冷却中</Badge>}
                     {m.enabled && !m.disabled && !cooled && <Badge kind="green">就绪</Badge>}
                   </td>
-                  <td style={{ whiteSpace: 'nowrap' }}>
-                    {(m.disabled || cooled) && <button className="btn ghost sm" onClick={() => reset(m.id)}>重置</button>}{' '}
-                    <button className="btn ghost sm" onClick={() => { if (confirm('删除该模型？')) { api.deleteModel(m.id); refresh(); } }}>删</button>
+                  <td>
+                    <div className="row-actions">
+                      {(m.disabled || cooled) && <button className="btn ghost sm" onClick={() => reset(m.id)}>重置</button>}
+                      <button className="btn icon danger" title="删除该模型" aria-label="删除模型" onClick={() => { if (confirm('删除该模型？')) { api.deleteModel(m.id); refresh(); } }}><IconTrash /></button>
+                    </div>
                   </td>
                 </tr>
               );
@@ -657,7 +736,11 @@ export function Tokens({ state, refresh }: { state: State; refresh: () => void }
                 </td>
                 <td>{t.enabled ? <Badge kind="green">启用</Badge> : <Badge kind="gray">停用</Badge>}</td>
                 <td className="muted">{timeStr(t.createdAt)}</td>
-                <td><button className="btn ghost sm" onClick={() => { if (confirm('删除该令牌？')) { api.deleteToken(t.id); refresh(); } }}>删</button></td>
+                <td>
+                  <div className="row-actions">
+                    <button className="btn icon danger" title="删除该令牌" aria-label="删除令牌" onClick={() => { if (confirm('删除该令牌？')) { api.deleteToken(t.id); refresh(); } }}><IconTrash /></button>
+                  </div>
+                </td>
               </tr>
             ))}
             {state.tokens.length === 0 && <tr><td colSpan={5} className="empty">还没有令牌</td></tr>}
@@ -943,6 +1026,8 @@ export function Settings({ state, refresh, setState }: { state: State; refresh: 
   const toast = useToast();
   const [s, setS] = useState({ ...state.settings });
   const [autoLaunch, setAutoLaunch] = useState(false);
+  const [ioBusy, setIoBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   const isDesktop = !!(window as any).app;
 
   useEffect(() => {
@@ -964,6 +1049,48 @@ export function Settings({ state, refresh, setState }: { state: State; refresh: 
       if (r?.ok) { setAutoLaunch(v); toast(v ? '已开启开机启动（下次开机自动后台运行）' : '已关闭开机启动'); }
       else toast('设置失败：' + (r?.error || '未知错误'));
     } catch (e: any) { toast('设置失败：' + (e?.message || e)); }
+  };
+
+  // 导出：把频道 + API Key + 模型池等打包下载为 JSON
+  const doExport = async () => {
+    setIoBusy(true);
+    try {
+      const data = await api.exportConfig();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `xuanshu-config-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      toast('已导出配置文件（含 API Key，请妥善保管）');
+    } catch (e: any) { toast('导出失败：' + (e?.message || e)); }
+    finally { setIoBusy(false); }
+  };
+
+  // 导入：支持玄枢导出（全量恢复）与 One API / New API 频道导出（追加）
+  const onPickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    setIoBusy(true);
+    try {
+      const text = await f.text();
+      let payload: any;
+      try { payload = JSON.parse(text); } catch { toast('文件不是合法的 JSON'); return; }
+      const isNative = payload?.app === 'xuanshu' || payload?.kind === 'config';
+      const label = isNative ? '玄枢配置（全量恢复：替换现有频道/模型/令牌/路由）' : 'One API / New API 频道（追加导入）';
+      if (!confirm(`将导入：${label}\n\n导入前会自动备份当前配置到 config.json.bak。继续？`)) return;
+      const r: any = await api.importConfig(payload);
+      if (r?.ok) {
+        const c = r.counts || {};
+        toast(`导入成功：${r.mode === 'replace' ? '已恢复' : '已追加'} · 频道 ${c.channels ?? 0}｜模型 ${c.models ?? 0}`);
+        await refresh();
+      } else {
+        toast('导入失败：' + (r?.error || '未知错误'));
+      }
+    } catch (e: any) { toast('导入失败：' + (e?.message || e)); }
+    finally { setIoBusy(false); }
   };
 
   return (
@@ -1067,6 +1194,100 @@ export function Settings({ state, refresh, setState }: { state: State; refresh: 
         <Row label="日志上限（行数）" desc="滚动截断时保留的行数" borderBottom={false}>
           <input type="number" value={s.logCapLines} onChange={(e) => setS({ ...s, logCapLines: +e.target.value })} onBlur={() => save({ logCapLines: s.logCapLines })} className="set-ctl num" />
         </Row>
+      </Card>
+
+      <Card className="mt16" style={{ padding: '4px 18px' }}>
+        <Row label="导出配置" desc="把频道（含 Base URL / API Key）、模型池、分组、令牌、路由导出为 JSON，便于备份或迁移到另一台机器">
+          <button className="btn secondary sm" disabled={ioBusy} onClick={doExport}>导出为 JSON</button>
+        </Row>
+        <Row label="导入配置" desc="支持玄枢导出的 JSON（全量恢复），以及 One API / New API 的频道导出（自动转换后追加）；导入前会备份当前配置" borderBottom={false}>
+          <div className="flex center gap8">
+            <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={onPickFile} />
+            <button className="btn secondary sm" disabled={ioBusy} onClick={() => fileRef.current?.click()}>选择 JSON 文件…</button>
+          </div>
+        </Row>
+      </Card>
+    </div>
+  );
+}
+
+// =================== About（关于）==================
+export function About({ state }: { state: State }) {
+  const [about, setAbout] = useState<any>(null);
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState<any>(null);
+
+  useEffect(() => { api.about().then(setAbout).catch(() => {}); }, []);
+
+  // 桌面端走系统浏览器打开；Web Admin 下退回 window.open
+  const open = (url: string) => {
+    const app = (window as any).app;
+    if (app?.openExternal) app.openExternal(url);
+    else window.open(url, '_blank', 'noopener');
+  };
+
+  const check = async () => {
+    setChecking(true); setResult(null);
+    try { setResult(await api.checkUpdate()); }
+    catch (e: any) { setResult({ ok: false, error: e?.message || String(e) }); }
+    finally { setChecking(false); }
+  };
+
+  const version = about?.version || state.version || '—';
+  const repo = about?.repo || 'https://github.com/gncarl/XuanShu';
+  const releases = about?.releases || `${repo}/releases`;
+
+  return (
+    <div>
+      <h1>关于</h1>
+      <p className="lead">玄枢 · 本地 AI 聚合路由网关</p>
+
+      <Card className="about-card">
+        <div className="about-head">
+          <div className="about-logo">玄</div>
+          <div>
+            <div className="about-name">玄枢 <span className="about-ver">v{version}</span></div>
+            <div className="muted" style={{ fontSize: 13 }}>把多个上游 AI 服务聚合成一个本地入口，带故障转移、重试与用量统计。</div>
+          </div>
+        </div>
+
+        <div className="about-links">
+          <button className="btn secondary sm" onClick={() => open(repo)}>GitHub 仓库 <IconExternal /></button>
+          <button className="btn secondary sm" onClick={() => open(releases)}>发布页面 <IconExternal /></button>
+          <button className="btn sm" disabled={checking} onClick={check}>{checking ? '检查中…' : '检查更新'}</button>
+        </div>
+
+        {result && (
+          <div className={`about-result ${result.ok && result.hasUpdate ? 'has' : ''}`}>
+            {!result.ok && <span>⚠️ 检查更新失败：{result.error}</span>}
+            {result.ok && result.hasUpdate && (
+              <span>
+                发现新版本 <b>v{result.latest}</b>（当前 v{result.current}）。
+                <button className="btn ghost sm" onClick={() => open(result.url || releases)}>前往下载</button>
+              </span>
+            )}
+            {result.ok && !result.hasUpdate && (
+              <span>✓ 已是最新版本（v{result.current}）{result.note ? ' · ' + result.note : ''}</span>
+            )}
+          </div>
+        )}
+      </Card>
+
+      <Card className="mt16">
+        <strong>运行信息</strong>
+        <div className="kv mt8">
+          <div className="kv-row"><span>软件版本</span><b>v{version}</b></div>
+          <div className="kv-row"><span>代理端口</span><b>{state.settings.proxyPort}</b></div>
+          <div className="kv-row"><span>管理端口</span><b>{state.settings.adminPort}</b></div>
+          <div className="kv-row"><span>配置文件</span><b className="muted">%APPDATA%\ai-gateway\ai-gateway-data\config.json</b></div>
+        </div>
+      </Card>
+
+      <Card className="mt16">
+        <strong>隐私说明</strong>
+        <p className="muted mt8" style={{ marginBottom: 0 }}>
+          玄枢为本地自托管工具：所有频道配置、API Key、请求日志均只保存在你本机，不做任何云端上传。
+        </p>
       </Card>
     </div>
   );

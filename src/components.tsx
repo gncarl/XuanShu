@@ -106,14 +106,37 @@ export class ErrorBoundary extends React.Component<
   }
 }
 
+// ---------------- 图标（内联 SVG，随主题色变化）----------------
+export function IconTrash({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M3 4.2h10M6.4 4.2V3.1c0-.5.4-.9.9-.9h1.4c.5 0 .9.4.9.9v1.1M4.4 4.2l.5 8.1c0 .6.5 1.1 1.1 1.1h4c.6 0 1.1-.5 1.1-1.1l.5-8.1M6.7 6.7v4.2M9.3 6.7v4.2"
+        stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+export function IconExternal({ size = 13 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M6.5 3.5H4A1.5 1.5 0 0 0 2.5 5v7A1.5 1.5 0 0 0 4 13.5h7A1.5 1.5 0 0 0 12.5 12V9.5M9.5 2.5h4v4M13 3L7.5 8.5"
+        stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 // ---------------- 侧边栏 ----------------
 const ICONS: Record<string, string> = {
-  Dashboard: '📊', Channels: '🔌', Models: '🧩', Tokens: '🔑', Logs: '📜', Stats: '📈', Settings: '⚙️',
+  Dashboard: '📊', Channels: '🔌', Models: '🧩', Tokens: '🔑', Logs: '📜', Stats: '📈', Settings: '⚙️', About: 'ℹ️',
 };
-export function Sidebar({ active, onNav }: { active: string; onNav: (k: string) => void }) {
-  const items = ['Dashboard', 'Channels', 'Models', 'Tokens', 'Logs', 'Stats', 'Settings'];
+export const PAGES = ['Dashboard', 'Channels', 'Models', 'Tokens', 'Logs', 'Stats', 'Settings', 'About'];
+export function Sidebar({ active, onNav, version }: { active: string; onNav: (k: string) => void; version?: string }) {
+  const items = PAGES;
   const labels: Record<string, string> = {
-    Dashboard: '仪表盘', Channels: '频道', Models: '模型池', Tokens: '令牌', Logs: '日志', Stats: '统计', Settings: '设置',
+    Dashboard: '仪表盘', Channels: '频道', Models: '模型池', Tokens: '令牌', Logs: '日志', Stats: '统计', Settings: '设置', About: '关于',
   };
   return (
     <div className="sidebar">
@@ -121,7 +144,7 @@ export function Sidebar({ active, onNav }: { active: string; onNav: (k: string) 
         <div className="logo">玄</div>
         <div>
           <div className="name">玄枢</div>
-          <div className="sub">本地聚合路由网关</div>
+          <div className="sub">本地聚合路由网关{version ? ` · v${version}` : ''}</div>
         </div>
       </div>
       {items.map((k) => (
@@ -164,8 +187,8 @@ export function Field({ label, children, hint }: { label: string; children: Reac
     </label>
   );
 }
-export function Badge({ children, kind = '' }: { children: React.ReactNode; kind?: string }) {
-  return <span className={`badge ${kind}`}>{children}</span>;
+export function Badge({ children, kind = '', title }: { children: React.ReactNode; kind?: string; title?: string }) {
+  return <span className={`badge ${kind}`} title={title}>{children}</span>;
 }
 export function KPI({ label, value, unit }: { label: string; value: React.ReactNode; unit?: string }) {
   return (

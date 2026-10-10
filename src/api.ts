@@ -30,6 +30,14 @@ export const api = {
   state: () => req('GET', '/state'),
   saveSettings: (patch: any) => req('PUT', '/settings', patch),
 
+  // 「关于」面板 / 检查更新
+  about: () => req('GET', '/about'),
+  checkUpdate: () => req('GET', '/check-update'),
+
+  // 配置导出 / 导入
+  exportConfig: () => req('GET', '/config/export'),
+  importConfig: (payload: any) => req('POST', '/config/import', payload),
+
   listChannels: () => req('GET', '/channels'),
   addChannel: (c: any) => req('POST', '/channels', c),
   updateChannel: (id: string, c: any) => req('PUT', `/channels/${id}`, c),

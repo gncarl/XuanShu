@@ -5,7 +5,8 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { startBackend } from '../electron/backend/index.js';
-import { fetchChannelModels } from '../electron/backend/channels.js';
+import { fetchChannelModels, probeChannel } from '../electron/backend/channels.js';
+import { buildExport, applyImport, detectFormat } from '../electron/backend/configIO.js';
 import { withVersion } from '../electron/backend/util.js';
 
 const results = [];
@@ -26,6 +27,13 @@ const mock = http.createServer((req, res) => {
     const url = req.url;
     recorded.push(url);
 
+    if (req.method === 'GET' && url.includes('/secure/') && url.endsWith('/models')) {
+      // 模拟「要求自定义转发密钥头」的中转站（如 Modal）
+      if (req.headers['x-forward-secret'] !== 'sec-123') {
+        return end(res, 401, { error: 'missing forward secret' });
+      }
+      return end(res, 200, { object: 'list', data: [{ id: 'secure-model' }] });
+    }
     if (req.method === 'GET' && url.includes('/v1/models')) {
       return end(res, 200, { object: 'list', data: [{ id: 'mock-gpt' }, { id: 'fail-model' }, { id: 'empty-model' }] });
     }
@@ -121,7 +129,7 @@ function get(port, path) {
 async function main() {
   const mockPort = await mockListen(19899);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aigw-'));
-  const { proxyPort, adminPort, store } = await startBackend({ isDesktop: false, dataDir });
+  const { proxyPort, adminPort, store } = await startBackend({ isDesktop: false, dataDir, version: '0.2.3' });
   const base = `http://127.0.0.1:${proxyPort}`;
 
   // 清空示例，建立测试数据
@@ -257,6 +265,68 @@ async function main() {
   r = await client(proxyPort, '/v1/chat/completions', { model: 'AUTO', stream: false, messages: [{ role: 'user', content: 'hi' }] });
   const secondHit = recorded.some((u) => u.includes('/chat/completions'));
   check('T17b 负缓存命中：第二次 AUTO 不再向该上游发请求', r.status === 502 && !secondHit, `status=${r.status} hitChat=${secondHit}`);
+
+  // ---------- T18 额外请求头透传 + 探测区分鉴权失败（修复「链接通但拉不到模型 / 假绿灯」）----------
+  // 模拟 Modal 这类要求自定义转发密钥头的中转站：缺头 → 401 missing forward secret
+  const chSecure = store.addChannel({ name: 'secure', baseUrl: `http://127.0.0.1:${mockPort}/secure`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+
+  const prNoHdr = await probeChannel(store.getChannel(chSecure.id));
+  check('T18a 探测：401 不再误报绿灯（识别为鉴权失败）',
+    prNoHdr.ok === false && prNoHdr.authFail === true,
+    `ok=${prNoHdr.ok} authFail=${prNoHdr.authFail} status=${prNoHdr.status}`);
+
+  const fmNoHdr = await fetchChannelModels(store.getChannel(chSecure.id));
+  check('T18b 缺自定义头时拉模型鉴权失败并透出上游原文',
+    fmNoHdr.ok === false && fmNoHdr.authFail === true && /forward secret/i.test(fmNoHdr.error || ''),
+    `err=${fmNoHdr.error}`);
+
+  store.updateChannel(chSecure.id, { extraHeaders: { 'x-forward-secret': 'sec-123' } });
+  const prHdr = await probeChannel(store.getChannel(chSecure.id));
+  check('T18c 补上额外请求头后探测通过', prHdr.ok === true, `ok=${prHdr.ok} status=${prHdr.status}`);
+
+  const fmHdr = await fetchChannelModels(store.getChannel(chSecure.id));
+  check('T18d 补上额外请求头后拉模型成功（extraHeaders 已透传）',
+    fmHdr.ok === true && fmHdr.models.includes('secure-model'), `models=${(fmHdr.models || []).join(',')}`);
+
+  // ---------- T19 配置导出 / 导入（含 One API / New API 兼容格式）----------
+  const exp = buildExport(store, { version: '0.2.3' });
+  check('T19a 导出包含频道与模型且带格式标记',
+    exp.app === 'xuanshu' && Array.isArray(exp.channels) && exp.channels.length > 0 && Array.isArray(exp.models),
+    `channels=${exp.channels.length}`);
+
+  const oneApi = { channels: [{ id: 1, name: 'oa-1', type: 1, key: 'sk-oa', base_url: 'https://api.example.com', models: 'm1,m2', group: 'default' }] };
+  check('T19b 识别 One API / New API 格式', detectFormat(oneApi) === 'oneapi');
+  check('T19c 识别玄枢原生格式', detectFormat(exp) === 'xuanshu');
+
+  const beforeCh = store.data.channels.length;
+  const impMerge = applyImport(store, oneApi);
+  const oaCh = store.data.channels.find((c) => c.name === 'oa-1');
+  check('T19d One API 追加导入（频道 + 模型已完成字段映射）',
+    impMerge.ok && impMerge.mode === 'merge' && store.data.channels.length === beforeCh + 1
+      && impMerge.counts.models === 2 && !!oaCh
+      && oaCh.baseUrl === 'https://api.example.com' && oaCh.apiKey === 'sk-oa' && oaCh.protocol === 'openai',
+    `counts=${JSON.stringify(impMerge.counts)}`);
+
+  const impReplace = applyImport(store, exp);
+  check('T19e 玄枢导出全量恢复',
+    impReplace.ok && impReplace.mode === 'replace'
+      && store.data.channels.length === exp.channels.length && store.data.models.length === exp.models.length,
+    `counts=${JSON.stringify(impReplace.counts)}`);
+  check('T19f 导入前生成滚动备份 config.json.bak',
+    !!impReplace.backupPath && impReplace.backupPath.endsWith('config.json.bak') && fs.existsSync(impReplace.backupPath));
+
+  // ---------- T20 管理端点：关于 / 配置导出 / 配置导入 ----------
+  const aboutRes = await get(adminPort, '/api/about');
+  const aboutJson = JSON.parse(aboutRes.body || '{}');
+  check('T20a /api/about 返回版本与仓库链接',
+    aboutRes.status === 200 && aboutJson.version === '0.2.3' && /github\.com\/gncarl\/XuanShu/.test(aboutJson.repo || ''),
+    `version=${aboutJson.version}`);
+
+  const expRes = await get(adminPort, '/api/config/export');
+  check('T20b /api/config/export 可导出', expRes.status === 200 && JSON.parse(expRes.body).app === 'xuanshu');
+
+  const impRes = await client(adminPort, '/api/config/import', { channels: [{ name: 'api-oa', key: 'sk-2', base_url: 'https://x.example.com', type: 1, models: 'z1' }] });
+  check('T20c /api/config/import 可导入（One API 格式）', impRes.status === 200 && JSON.parse(impRes.body).ok === true, `body=${impRes.body.slice(0, 120)}`);
 
   const failed = results.filter((x) => !x.ok).length;
   console.log(`\n结果：${results.length - failed}/${results.length} 通过`);

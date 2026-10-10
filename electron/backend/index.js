@@ -49,7 +49,11 @@ export async function startBackend(opts = {}) {
   const session = new SessionManager();
 
   // 管理/Web Admin 端口
-  const adminApp = createAdminApp({ store, resilience, router, logstore, session, desktopMode: !!opts.isDesktop });
+  const adminApp = createAdminApp({
+    store, resilience, router, logstore, session,
+    desktopMode: !!opts.isDesktop,
+    version: opts.version || '',
+  });
   const { server: adminServer, port: adminPort } = await listenAvailable(() => http.createServer(adminApp), store.settings.adminPort);
 
   // 代理端口
