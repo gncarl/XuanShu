@@ -100,6 +100,12 @@ input, select, textarea { font-family: inherit; font-size: 14px; }
 .kpi .label { color: var(--text-3); font-size: 12px; margin-bottom: 6px; }
 .kpi .value { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; }
 .kpi .value small { font-size: 14px; color: var(--text-3); font-weight: 500; }
+.kpi .kpi-sub { margin-top: 4px; font-size: 11.5px; color: var(--text-3); }
+/* 时间段分段控件 */
+.seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 3px; gap: 2px; }
+.seg-item { border: 0; background: transparent; padding: 5px 12px; border-radius: 8px; font-size: 12.5px; color: var(--text-2); cursor: pointer; white-space: nowrap; }
+.seg-item:hover { color: var(--text); }
+.seg-item.active { background: var(--panel); color: var(--accent); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 
 /* ---------- 表单 ---------- */
 label.field { display: block; margin-bottom: 14px; }
@@ -287,6 +293,12 @@ tr:last-child td { border-bottom: none; }
 .hdr-row .hdr-v { flex: 1; }
 .hdr-row input { padding: 7px 10px; font-size: 12.5px; }
 .hdr-row .btn.icon { flex-shrink: 0; }
+.manual-add { display: flex; gap: 8px; align-items: center; }
+.manual-add input { flex: 1; }
+.manual-add .btn { flex-shrink: 0; }
+/* 模型属性小标签组 */
+.mtags { display: inline-flex; gap: 4px; flex-wrap: wrap; align-items: center; vertical-align: middle; }
+.mtags .badge { font-size: 10.5px; padding: 1px 7px; }
 
 /* ---------- 行内错误提示 ---------- */
 .inline-error {

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { probeChannel, fetchChannelModels } from './channels.js';
 import { buildExport, applyImport } from './configIO.js';
 import { compareVersion } from './util.js';
+import { modelMeta } from './modelMeta.js';
 import { PROTOCOL_LABELS, PROTOCOLS } from './types.js';
 
 // 项目主页 / 发布页（「关于」面板与「检查更新」用）
@@ -136,7 +137,30 @@ export function createAdminApp({ store, resilience, router, logstore, session, d
   app.post('/api/channels/:id/fetchModels', async (req, res) => {
     const c = store.getChannel(req.params.id);
     if (!c) return res.status(404).json({ error: 'not found' });
-    res.json(await fetchChannelModels(c));
+    const r = await fetchChannelModels(c);
+    // 附带每个模型的属性元数据（能力/上下文），供前端打小标签
+    if (r && r.ok && Array.isArray(r.models)) {
+      const poolMeta = new Map();
+      for (const m of store.listModels()) {
+        if (m.channelId === c.id && m.meta) poolMeta.set(m.upstreamModel || m.name, m.meta);
+      }
+      r.metas = Object.fromEntries(
+        r.models.map((name) => [name, modelMeta(name, { upstream: r.raw?.[name], userMeta: poolMeta.get(name) })]),
+      );
+    }
+    res.json(r);
+  });
+
+  // 批量查询模型属性（模型池表格用）：?names=a,b,c
+  app.get('/api/model-meta', (req, res) => {
+    const names = String(req.query.names || '').split(',').map((s) => s.trim()).filter(Boolean).slice(0, 500);
+    const poolMeta = new Map();
+    for (const m of store.listModels()) {
+      if (m.meta) poolMeta.set(m.upstreamModel || m.name, m.meta);
+    }
+    const out = {};
+    for (const n of names) out[n] = modelMeta(n, { userMeta: poolMeta.get(n) });
+    res.json(out);
   });
   app.post('/api/channels/:id/speedtest', async (req, res) => {
     const c = store.getChannel(req.params.id);

@@ -28,6 +28,8 @@ export interface ModelEntry {
   cooldownUntil: number;
   disabled: boolean;
   note?: string;
+  // 用户手动修正的模型属性（覆盖本地注册表推断）；不设则按名字推断
+  meta?: { caps?: string[]; context?: number | null; maxOutput?: number | null };
 }
 
 export interface Group { name: string; description: string; }

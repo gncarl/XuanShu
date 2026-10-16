@@ -190,11 +190,12 @@ export function Field({ label, children, hint }: { label: string; children: Reac
 export function Badge({ children, kind = '', title }: { children: React.ReactNode; kind?: string; title?: string }) {
   return <span className={`badge ${kind}`} title={title}>{children}</span>;
 }
-export function KPI({ label, value, unit }: { label: string; value: React.ReactNode; unit?: string }) {
+export function KPI({ label, value, unit, sub }: { label: string; value: React.ReactNode; unit?: string; sub?: React.ReactNode }) {
   return (
     <Card className="kpi">
       <div className="label">{label}</div>
       <div className="value">{value}{unit && <small> {unit}</small>}</div>
+      {sub !== undefined && <div className="kpi-sub">{sub}</div>}
     </Card>
   );
 }

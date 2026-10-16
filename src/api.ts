@@ -51,6 +51,8 @@ export const api = {
   updateModel: (id: string, m: any) => req('PUT', `/models/${id}`, m),
   deleteModel: (id: string) => req('DELETE', `/models/${id}`),
   resetModel: (id: string) => req('POST', `/models/${id}/reset`),
+  // 批量查询模型属性（能力/上下文）：names 为模型名数组
+  modelMeta: (names: string[]) => req('GET', '/model-meta?names=' + encodeURIComponent(names.join(','))),
 
   listRoutes: () => req('GET', '/routes'),
   addRoute: (r: any) => req('POST', '/routes', r),

@@ -130,5 +130,10 @@ export async function fetchChannelModels(channel) {
     };
   }
   const models = r.json.data.map((m) => (typeof m === 'string' ? m : m.id)).filter(Boolean);
-  return { ok: true, models, error: null };
+  // 原始条目也带回去：部分上游会在项里带 context_length / capabilities 等扩展字段，供模型属性推断使用
+  const raw = {};
+  for (const m of r.json.data) {
+    if (m && typeof m === 'object' && m.id) raw[m.id] = m;
+  }
+  return { ok: true, models, raw, error: null };
 }

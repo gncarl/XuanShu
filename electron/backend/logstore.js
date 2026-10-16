@@ -149,6 +149,7 @@ export class LogStore {
       successRate: total ? (ok / total) : 1,
       promptTokens, completionTokens, totalTokens,
       byModel, byChannel,
+      byDay,
       today: { count: t.count, tokens: t.tokens, success: t.success, failed: t.failed },
       avgPerDay, activeDays,
       heatmap, trend30,

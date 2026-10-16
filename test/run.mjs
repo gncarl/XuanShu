@@ -7,6 +7,7 @@ import path from 'node:path';
 import { startBackend } from '../electron/backend/index.js';
 import { fetchChannelModels, probeChannel } from '../electron/backend/channels.js';
 import { buildExport, applyImport, detectFormat } from '../electron/backend/configIO.js';
+import { modelMeta } from '../electron/backend/modelMeta.js';
 import { withVersion } from '../electron/backend/util.js';
 
 const results = [];
@@ -35,7 +36,11 @@ const mock = http.createServer((req, res) => {
       return end(res, 200, { object: 'list', data: [{ id: 'secure-model' }] });
     }
     if (req.method === 'GET' && url.includes('/v1/models')) {
-      return end(res, 200, { object: 'list', data: [{ id: 'mock-gpt' }, { id: 'fail-model' }, { id: 'empty-model' }] });
+      return end(res, 200, { object: 'list', data: [
+        { id: 'mock-gpt' }, { id: 'fail-model' }, { id: 'empty-model' },
+        { id: 'glm-4-flash', context_length: 128000 },                 // 上游带扩展字段
+        { id: 'mystery-model-9000', context_length: 9000 },            // 注册表没有，仅上游有上下文
+      ] });
     }
     if (url.includes('/v1beta/models/') && url.includes('streamGenerateContent')) {
       if (!json.stream) {
@@ -129,7 +134,7 @@ function get(port, path) {
 async function main() {
   const mockPort = await mockListen(19899);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aigw-'));
-  const { proxyPort, adminPort, store } = await startBackend({ isDesktop: false, dataDir, version: '0.2.3' });
+  const { proxyPort, adminPort, store } = await startBackend({ isDesktop: false, dataDir, version: '0.2.4' });
   const base = `http://127.0.0.1:${proxyPort}`;
 
   // 清空示例，建立测试数据
@@ -289,7 +294,7 @@ async function main() {
     fmHdr.ok === true && fmHdr.models.includes('secure-model'), `models=${(fmHdr.models || []).join(',')}`);
 
   // ---------- T19 配置导出 / 导入（含 One API / New API 兼容格式）----------
-  const exp = buildExport(store, { version: '0.2.3' });
+  const exp = buildExport(store, { version: '0.2.4' });
   check('T19a 导出包含频道与模型且带格式标记',
     exp.app === 'xuanshu' && Array.isArray(exp.channels) && exp.channels.length > 0 && Array.isArray(exp.models),
     `channels=${exp.channels.length}`);
@@ -319,7 +324,7 @@ async function main() {
   const aboutRes = await get(adminPort, '/api/about');
   const aboutJson = JSON.parse(aboutRes.body || '{}');
   check('T20a /api/about 返回版本与仓库链接',
-    aboutRes.status === 200 && aboutJson.version === '0.2.3' && /github\.com\/gncarl\/XuanShu/.test(aboutJson.repo || ''),
+    aboutRes.status === 200 && aboutJson.version === '0.2.4' && /github\.com\/gncarl\/XuanShu/.test(aboutJson.repo || ''),
     `version=${aboutJson.version}`);
 
   const expRes = await get(adminPort, '/api/config/export');
@@ -327,6 +332,56 @@ async function main() {
 
   const impRes = await client(adminPort, '/api/config/import', { channels: [{ name: 'api-oa', key: 'sk-2', base_url: 'https://x.example.com', type: 1, models: 'z1' }] });
   check('T20c /api/config/import 可导入（One API 格式）', impRes.status === 200 && JSON.parse(impRes.body).ok === true, `body=${impRes.body.slice(0, 120)}`);
+
+  // ---------- T21 模型属性小标签（注册表 + 上游扩展字段 + 用户修正）----------
+  // T21a 本地注册表推断：glm-4-flash（免费+工具）、gpt-4o（视觉+工具）、陌生模型兜底「文本」标推测
+  const metaGlm = modelMeta('glm-4-flash');
+  const metaGpt = modelMeta('gpt-4o');
+  const metaUnknown = modelMeta('some-unknown-xyz-7b');
+  check('T21a 注册表推断能力/上下文',
+    metaGlm.caps.includes('工具') && metaGlm.caps.includes('免费') && metaGlm.context === 128000
+      && metaGpt.caps.includes('视觉') && metaGpt.caps.includes('工具') && metaGpt.context === 128000
+      && metaUnknown.caps.includes('文本') && metaUnknown.source === 'guess',
+    `glm=${JSON.stringify(metaGlm)} gpt=${JSON.stringify(metaGpt)} unknown=${JSON.stringify(metaUnknown)}`);
+
+  // T21b 上游扩展字段覆盖：mystery-model-9000 注册表没有，但上游返回 context_length
+  const metaUp = modelMeta('mystery-model-9000', { upstream: { context_length: 9000 } });
+  check('T21b 上游 context_length 合入', metaUp.context === 9000, `ctx=${metaUp.context}`);
+
+  // T21c 用户手动修正优先
+  const metaUser = modelMeta('glm-4-flash', { userMeta: { caps: ['文本'], context: 4096 } });
+  check('T21c 用户修正优先于推断', metaUser.source === 'user' && metaUser.context === 4096 && metaUser.caps.length === 1, JSON.stringify(metaUser));
+
+  // T21d 拉模型响应附带 metas（含上游扩展字段，经管理 API 端点验证）
+  recorded.length = 0;
+  const chMeta = store.addChannel({ name: 'mock-meta', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  const fmRes = await client(adminPort, `/api/channels/${chMeta.id}/fetchModels`, {});
+  const fmMeta = JSON.parse(fmRes.body || '{}');
+  check('T21d fetchModels 附带 metas 且合入上游 context_length',
+    fmMeta.ok && fmMeta.metas && fmMeta.metas['mystery-model-9000']?.context === 9000 && !!fmMeta.metas['mock-gpt']?.caps,
+    `metas=${JSON.stringify(fmMeta.metas || {}).slice(0, 200)}`);
+
+  // T21e /api/model-meta 批量端点 + 用户修正落库后生效
+  const userModel = store.addModel({ name: 'my-custom', channelId: chMeta.id, upstreamModel: 'some-unknown-xyz-7b', group: 'AUTO', enabled: true });
+  store.updateModel(userModel.id, { meta: { caps: ['文本', '工具'], context: 65536 } });
+  const metaRes = await get(adminPort, '/api/model-meta?names=' + encodeURIComponent('some-unknown-xyz-7b,glm-4-flash'));
+  const metaJson = JSON.parse(metaRes.body || '{}');
+  check('T21e /api/model-meta 批量查询（用户修正覆盖推断）',
+    metaRes.status === 200 && metaJson['some-unknown-xyz-7b']?.source === 'user' && metaJson['some-unknown-xyz-7b']?.context === 65536
+      && metaJson['glm-4-flash']?.source === 'registry',
+    `res=${metaRes.body.slice(0, 220)}`);
+
+  // ---------- T22 仪表盘统计：today / byDay 按天聚合 ----------
+  const dayKeyNow = (() => { const d = new Date(); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; })();
+  const statsRes = await get(adminPort, '/api/logs/stats');
+  const statsJson = JSON.parse(statsRes.body || '{}');
+  check('T22a /api/logs/stats 暴露 today 与 byDay（仪表盘当日+时间段用）',
+    statsRes.status === 200 && statsJson.today && typeof statsJson.today.count === 'number'
+      && statsJson.byDay && typeof statsJson.byDay[dayKeyNow] === 'object',
+    `today=${JSON.stringify(statsJson.today)} dayKey=${dayKeyNow}`);
+  check('T22b 今天的请求已按天计入（此前若干用例已产生成功请求）',
+    (statsJson.today.count || 0) > 0 && (statsJson.byDay[dayKeyNow]?.count || 0) > 0,
+    `todayCount=${statsJson.today.count}`);
 
   const failed = results.filter((x) => !x.ok).length;
   console.log(`\n结果：${results.length - failed}/${results.length} 通过`);

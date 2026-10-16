@@ -145,6 +145,7 @@ export class DataStore {
       cooldownUntil: 0,
       disabled: false,
       note: m.note || '',
+      ...(m.meta && typeof m.meta === 'object' ? { meta: m.meta } : {}),
     };
     this.data.models.push(model);
     this.save();

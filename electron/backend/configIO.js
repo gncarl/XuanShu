@@ -146,6 +146,7 @@ function normalizeModel(m) {
     cooldownUntil: 0,
     disabled: false,
     note: m.note || '',
+    ...(m.meta && typeof m.meta === 'object' ? { meta: m.meta } : {}),
   };
 }
 function normalizeToken(t) {

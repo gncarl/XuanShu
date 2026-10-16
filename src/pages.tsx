@@ -16,6 +16,36 @@ function CopyBtn({ text, label = '复制' }: { text: string; label?: string }) {
 }
 
 // =================== Dashboard ===================
+
+// 模型属性小标签：能力（文本/工具/视觉/文生图/音频/推理/免费）+ 上下文窗口大小。
+// 数据来自后端 modelMeta（本地注册表 + 上游扩展字段 + 用户手动修正），
+// 因为多数 /v1/models 不返回能力与上下文，需要本地推断。
+const CAP_ORDER = ['文本', '工具', '视觉', '推理', '文生图', '视频', '音频', '免费'];
+const CAP_KIND: Record<string, string> = {
+  视觉: 'green', 推理: 'yellow', 文生图: 'red', 免费: 'green', 视频: 'gray', 音频: 'gray',
+};
+function fmtCtx(n?: number | null) {
+  if (!n || n <= 0) return '';
+  if (n >= 1048576) { const v = n / 1048576; return (v >= 10 ? Math.round(v) : +v.toFixed(1)) + 'M'; }
+  if (n >= 1024) return Math.round(n / 1024) + 'K';
+  return String(n);
+}
+function ModelTags({ meta }: { meta?: any }) {
+  if (!meta) return null;
+  const caps: string[] = Array.isArray(meta.caps) ? [...meta.caps] : [];
+  // 「文本」太普遍，只在唯一能力时才显示，避免噪音
+  const shown = caps.filter((c) => c !== '文本').sort((a, b) => CAP_ORDER.indexOf(a) - CAP_ORDER.indexOf(b));
+  if (caps.length === 1 && caps[0] === '文本') shown.push('文本');
+  const ctx = fmtCtx(meta.context);
+  if (!shown.length && !ctx) return null;
+  return (
+    <span className="mtags">
+      {shown.map((c) => <Badge key={c} kind={CAP_KIND[c] || ''}>{c}</Badge>)}
+      {ctx && <Badge kind="gray" title={`上下文窗口约 ${(meta.context || 0).toLocaleString()} tokens`}>{ctx} 上下文</Badge>}
+      {meta.source === 'guess' && <span className="muted" style={{ fontSize: 10.5 }} title="按模型名推断，未经上游确认">推测</span>}
+    </span>
+  );
+}
 export function Dashboard({ state, refresh }: { state: State; refresh: () => void }) {
   const [stats, setStats] = useState<any>(null);
   const load = () => api.logStats().then(setStats).catch(() => {});
@@ -32,17 +62,125 @@ export function Dashboard({ state, refresh }: { state: State; refresh: () => voi
     failPath = t.failed.map((v: number, i: number) => `${i === 0 ? 'M' : 'L'}${(i * step).toFixed(1)},${(H - (v / max) * H).toFixed(1)}`).join(' ');
   }
 
+  // ============ 当日 KPI（第一屏） ============
+  const td = stats?.today || { count: 0, tokens: 0, success: 0, failed: 0 };
+  const todayRate = td.count ? ((td.success / td.count) * 100).toFixed(1) : '—';
+
+  // ============ 时间段统计 ============
+  type RangeKey = 'today' | '7' | '15' | '30' | 'custom';
+  const [range, setRange] = useState<RangeKey>('today');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
+
+  const dayKey = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const RANGE_OPTS: { key: RangeKey; label: string }[] = [
+    { key: 'today', label: '当日' }, { key: '7', label: '近 7 天' }, { key: '15', label: '近 15 天' },
+    { key: '30', label: '近 30 天' }, { key: 'custom', label: '自定义' },
+  ];
+
+  // 区间起止（本地时区，含当天；自定义自动纠正反序）
+  const nowD = new Date();
+  let startKey = dayKey(nowD), endKey = dayKey(nowD);
+  if (range === 'custom') {
+    startKey = customFrom || dayKey(nowD);
+    endKey = customTo || dayKey(nowD);
+    if (startKey > endKey) { const tmp = startKey; startKey = endKey; endKey = tmp; }
+  } else if (range !== 'today') {
+    const n = Number(range);
+    startKey = dayKey(new Date(nowD.getFullYear(), nowD.getMonth(), nowD.getDate() - (n - 1)));
+  }
+
+  // 区间按天序列（逐日补零，跨月/跨年不会断）
+  const days: string[] = [];
+  {
+    const [y, m, dd] = startKey.split('-').map(Number);
+    const [ey, em, ed] = endKey.split('-').map(Number);
+    const cur = new Date(y, m - 1, dd);
+    const end = new Date(ey, em - 1, ed);
+    let guard = 0;
+    while (cur <= end && guard++ < 800) { days.push(dayKey(cur)); cur.setDate(cur.getDate() + 1); }
+  }
+
+  const byDay = stats?.byDay || {};
+  const series = days.map((k) => byDay[k] || { count: 0, tokens: 0, success: 0, failed: 0 });
+  const agg = series.reduce((a, v) => ({
+    count: a.count + (v.count || 0), tokens: a.tokens + (v.tokens || 0),
+    success: a.success + (v.success || 0), failed: a.failed + (v.failed || 0),
+  }), { count: 0, tokens: 0, success: 0, failed: 0 });
+  const aggRate = agg.count ? ((agg.success / agg.count) * 100).toFixed(1) + ' %' : '—';
+  const rangeLabel = range === 'custom' ? `${startKey} ~ ${endKey}` : RANGE_OPTS.find((o) => o.key === range)?.label || '';
+
+  // 区间每日 Token 柱状图
+  const RW = 560, RH = 110;
+  const maxTok = Math.max(1, ...series.map((v) => v.tokens || 0));
+  const bw = series.length > 1 ? RW / series.length : RW;
+  const tokenBars = series.map((v, i) => {
+    const h = ((v.tokens || 0) / maxTok) * RH;
+    return <rect key={i} x={(i * bw + 1).toFixed(1)} y={(RH - h).toFixed(1)} width={Math.max(1, bw - 2).toFixed(1)} height={Math.max(0, h).toFixed(1)} rx="2" fill="var(--accent)" opacity={0.85} />;
+  });
+  // 每日请求数折线
+  const maxCnt = Math.max(1, ...series.map((v) => v.count || 0));
+  const cntPath = series.map((v, i) => `${i === 0 ? 'M' : 'L'}${(i * bw + bw / 2).toFixed(1)},${(RH - ((v.count || 0) / maxCnt) * RH).toFixed(1)}`).join(' ');
+
   return (
     <div>
       <h1>仪表盘</h1>
       <p className="lead">本地 AI 聚合路由网关的运行概览。所有数据仅存于本机，不做任何备份。</p>
 
-      <div className="grid cols-4">
-        <KPI label="总请求" value={fmtNum(stats?.total)} />
-        <KPI label="成功率" value={((stats?.successRate || 0) * 100).toFixed(1)} unit="%" />
-        <KPI label="失败" value={fmtNum(stats?.failed)} />
-        <KPI label="Token 用量" value={fmtNum((stats?.totalTokens || 0))} />
+      {/* 第一屏：当日调用情况 */}
+      <div className="flex between center" style={{ marginBottom: 10 }}>
+        <strong style={{ fontSize: 14 }}>今日 Token 调用</strong>
+        <span className="muted" style={{ fontSize: 12 }}>按本地时区 0 点切分 · 每 5 秒自动刷新</span>
       </div>
+      <div className="grid cols-4">
+        <KPI label="今日请求" value={fmtNum(td.count)} sub={`累计 ${fmtNum(stats?.total)} 次`} />
+        <KPI label="今日 Token" value={fmtNum(td.tokens)} sub={`累计 ${fmtNum(stats?.totalTokens || 0)}`} />
+        <KPI label="今日成功率" value={todayRate} unit="%" sub={td.count ? `失败 ${fmtNum(td.failed)} 次` : '今日暂无请求'} />
+        <KPI label="今日失败" value={fmtNum(td.failed)} sub={td.count ? `成功 ${fmtNum(td.success)} 次` : '—'} />
+      </div>
+
+      {/* 第二屏：时间段切换 */}
+      <Card className="mt24">
+        <div className="flex between center" style={{ flexWrap: 'wrap', gap: 8 }}>
+          <strong style={{ fontSize: 14 }}>Token 调用情况 · {rangeLabel}</strong>
+          <div className="seg">
+            {RANGE_OPTS.map((o) => (
+              <button key={o.key} type="button" className={`seg-item ${range === o.key ? 'active' : ''}`} onClick={() => setRange(o.key)}>{o.label}</button>
+            ))}
+          </div>
+        </div>
+
+        {range === 'custom' && (
+          <div className="flex gap8 center mt8" style={{ flexWrap: 'wrap' }}>
+            <input type="date" value={customFrom} max={customTo || undefined} onChange={(e) => setCustomFrom(e.target.value)} style={{ width: 150 }} />
+            <span className="muted">至</span>
+            <input type="date" value={customTo} min={customFrom || undefined} onChange={(e) => setCustomTo(e.target.value)} style={{ width: 150 }} />
+            <span className="muted" style={{ fontSize: 12 }}>不填则默认当天；共 {days.length} 天</span>
+          </div>
+        )}
+
+        <div className="grid cols-4 mt16">
+          <KPI label="区间请求" value={fmtNum(agg.count)} />
+          <KPI label="区间 Token" value={fmtNum(agg.tokens)} />
+          <KPI label="区间成功率" value={aggRate} />
+          <KPI label="区间失败" value={fmtNum(agg.failed)} />
+        </div>
+
+        <div className="mt16">
+          <div className="flex between" style={{ fontSize: 12 }}>
+            <span className="muted">每日 Token 用量（柱）</span>
+            <span className="muted">每日请求数（线）</span>
+          </div>
+          <svg viewBox={`0 0 ${RW} ${RH}`} width="100%" height={RH + 8} style={{ marginTop: 6 }}>
+            {tokenBars}
+            <path d={cntPath} fill="none" stroke="var(--green)" strokeWidth="2" />
+          </svg>
+          <div className="flex between muted" style={{ fontSize: 11 }}>
+            <span>{startKey}</span>
+            <span>{endKey}</span>
+          </div>
+        </div>
+      </Card>
 
       <div className="grid cols-2 mt24">
         <Card>
@@ -131,6 +269,11 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
   const [addGroup, setAddGroup] = useState(state.settings.autoGroup);
   const [headerRows, setHeaderRows] = useState<{ k: string; v: string }[]>([]);
   const [fetchError, setFetchError] = useState<any>(null);
+  // 手动加入的模型（上游 /v1/models 拉不到的，如官方免费但未列出的）
+  const [manualInput, setManualInput] = useState('');
+  const [manualSet, setManualSet] = useState<Set<string>>(() => new Set());
+  // 模型属性元数据（能力/上下文小标签），拉取时由后端一并返回
+  const [metas, setMetas] = useState<Record<string, any>>({});
   const pickRef = useRef<HTMLDivElement | null>(null);
 
   // 拉取完成后把结果列表滚进视野（弹窗比屏幕高时，否则要手动往下拉才看得到）
@@ -143,13 +286,13 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
 
   const openNew = () => {
     setForm(emptyChannel()); setFetched([]); setPicked({}); setFilter('');
-    setHeaderRows([]); setFetchError(null);
+    setHeaderRows([]); setFetchError(null); setManualInput(''); setManualSet(new Set()); setMetas({});
     setAddGroup(state.settings.autoGroup); setOpen(true);
   };
   const openEdit = (c: Channel) => {
     setForm({ ...c }); setFetched([]); setPicked({}); setFilter('');
     setHeaderRows(Object.entries(c.extraHeaders || {}).map(([k, v]) => ({ k, v })));
-    setFetchError(null);
+    setFetchError(null); setManualInput(''); setManualSet(new Set()); setMetas({});
     setAddGroup(state.settings.autoGroup); setOpen(true);
   };
 
@@ -196,10 +339,36 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
       const pool = new Set(state.models.filter((m) => m.channelId === id).map((m) => m.upstreamModel || m.name));
       const p: Record<string, boolean> = {};
       for (const m of uniq) p[m] = !pool.has(m);   // 已在池里的默认不勾
-      setFetched(uniq); setPicked(p);
+      setFetched(uniq); setPicked(p); setManualSet(new Set()); setMetas(r.metas || {});
       toast(`拉取到 ${uniq.length} 个模型，勾选要加入的`);
     } catch (e: any) { toast('拉取失败：' + (e?.message || e)); }
     finally { setBusy(false); }
+  };
+
+  // 手动加入模型名：支持逗号/中文逗号/分号/换行/空格分隔批量输入，回车即加入列表并默认勾选
+  const commitManual = () => {
+    const names = manualInput.split(/[\s,，;；]+/).map((s) => s.trim()).filter(Boolean);
+    if (!names.length) return;
+    const pool = new Set(state.models.filter((m) => m.channelId === form.id).map((m) => m.upstreamModel || m.name));
+    const next = [...fetched];
+    const nextPicked = { ...picked };
+    const nextManual = new Set(manualSet);
+    let added = 0;
+    let dup = 0;
+    for (const n of names) {
+      if (next.includes(n)) { dup++; continue; }
+      next.push(n);
+      nextManual.add(n);
+      added++;
+      if (!pool.has(n)) nextPicked[n] = true;   // 未入池的默认勾选
+    }
+    setFetched(next); setPicked(nextPicked); setManualSet(nextManual); setManualInput('');
+    toast(`已加入列表 ${added} 个${dup ? `（${dup} 个重复已忽略）` : ''}，确认后点「加入选中的 N 个」落库`);
+    // 手动加入的模型也拉一份属性标签（后端按名字推断）
+    const fresh = names.filter((n) => !metas[n]);
+    if (fresh.length) {
+      api.modelMeta(fresh).then((mm) => setMetas((prev) => ({ ...prev, ...mm }))).catch(() => {});
+    }
   };
 
   const pickAll = (v: boolean) => {
@@ -348,6 +517,21 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
               </div>
             )}
 
+            {/* 手动加入：上游列表拉不到/拉取失败时也能用（如官方免费但未列出的模型） */}
+            <div className="manual-add mt8">
+              <input
+                type="text"
+                placeholder="手动输入模型名，回车加入（如 glm-4-flash；支持逗号 / 空格分隔批量）"
+                value={manualInput}
+                onChange={(e) => setManualInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitManual(); } }}
+              />
+              <button type="button" className="btn ghost sm" onClick={commitManual} disabled={!manualInput.trim()}>加入列表</button>
+            </div>
+            <div className="hint" style={{ marginTop: 4 }}>
+              上游 <code>/v1/models</code> 未列出的模型（如部分厂商的免费模型），在此输入名字回车即可加入下方列表并默认勾选，标「手动·未验证」。
+            </div>
+
             {fetched.length > 0 && (
               <>
                 <div className="flex between center mt16" style={{ gap: 8, alignItems: 'center' }}>
@@ -366,6 +550,7 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
                   <div className="pick-list">
                     {shown.map((m) => {
                       const done = inPool(m);
+                      const isManual = manualSet.has(m);
                       return (
                         <label key={m} className={`pick-item ${done ? 'done' : ''}`}>
                           <input
@@ -375,7 +560,9 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
                             onChange={(e) => setPicked((p) => ({ ...p, [m]: e.target.checked }))}
                           />
                           <span className="nm">{m}</span>
+                          {isManual && <Badge kind="yellow">手动·未验证</Badge>}
                           {done && <Badge kind="gray">已在模型池</Badge>}
+                          <ModelTags meta={metas[m]} />
                         </label>
                       );
                     })}
@@ -392,6 +579,12 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
                   <Field label="加入后的优先级" hint="与上面「优先级」一致"><input type="number" value={form.priority ?? 100} onChange={(e) => setForm({ ...form, priority: +e.target.value })} /></Field>
                 </div>
               </>
+            )}
+
+            {fetched.length === 0 && (
+              <div className="empty mt8" style={{ padding: 18, fontSize: 13 }}>
+                尚未拉取到模型。可点右上角「拉取模型」，或直接在上方输入模型名手动加入。
+              </div>
             )}
           </div>
 
@@ -424,17 +617,48 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
   const toast = useToast();
   const [show, setShow] = useState(false);
   const [form, setForm] = useState<any>({ group: state.settings.autoGroup, enabled: true, priority: 100 });
+  // 模型属性元数据（name → { caps, context, source }）
+  const [metas, setMetas] = useState<Record<string, any>>({});
+  // 属性编辑弹窗
+  const [metaEdit, setMetaEdit] = useState<ModelEntry | null>(null);
+  const [metaForm, setMetaForm] = useState<{ caps: string[]; context: string }>({ caps: [], context: '' });
   // 路由规则
   const [rOpen, setROpen] = useState(false);
   const [rEditId, setREditId] = useState<string | null>(null);
   const [rForm, setRForm] = useState<any>(emptyRoute());
   const [rFilter, setRFilter] = useState('');
 
+  // 拉取模型池全部模型的属性（批量一次请求）
+  useEffect(() => {
+    const names = Array.from(new Set(state.models.map((m) => m.upstreamModel || m.name)));
+    if (!names.length) { setMetas({}); return; }
+    let alive = true;
+    api.modelMeta(names).then((mm) => { if (alive) setMetas(mm); }).catch(() => {});
+    return () => { alive = false; };
+  }, [state.models]);
+
   const save = async () => {
     if (!form.name || !form.channelId) return toast('请填写模型名并选择频道');
     await api.addModel(form); toast('已添加模型'); setShow(false); setForm({ group: state.settings.autoGroup, enabled: true, priority: 100 }); refresh();
   };
   const reset = async (id: string) => { await api.resetModel(id); toast('已重置冷却/熔断'); refresh(); };
+
+  // ---- 模型属性编辑（手动修正能力/上下文，存进 config.json）----
+  const openMeta = (m: ModelEntry) => {
+    const inferred = metas[m.upstreamModel || m.name];
+    const src = m.meta || inferred || {};
+    setMetaForm({ caps: [...(src.caps || [])], context: src.context ? String(src.context) : '' });
+    setMetaEdit(m);
+  };
+  const saveMeta = async () => {
+    if (!metaEdit) return;
+    const ctx = metaForm.context.trim() ? Number(metaForm.context.trim()) : null;
+    if (metaForm.context.trim() && (!ctx || ctx <= 0)) return toast('上下文请填正整数（token 数）');
+    const meta = { caps: metaForm.caps, context: ctx, maxOutput: metaEdit.meta?.maxOutput ?? null };
+    await api.updateModel(metaEdit.id, { meta });
+    setMetas((prev) => ({ ...prev, [metaEdit.upstreamModel || metaEdit.name]: { ...meta, source: 'user' } }));
+    toast('已保存模型属性'); setMetaEdit(null); refresh();
+  };
 
   // ---- 路由规则操作 ----
   const openNewRoute = () => { setREditId(null); setRForm(emptyRoute()); setRFilter(''); setROpen(true); };
@@ -549,7 +773,7 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
           <button className="btn secondary sm" onClick={() => setShow(true)}>+ 新建模型</button>
         </div>
         <table className="mt8">
-          <thead><tr><th>客户端模型名</th><th>上游模型</th><th>频道</th><th>分组</th><th>别名</th><th>优先级</th><th>状态</th><th></th></tr></thead>
+          <thead><tr><th>客户端模型名</th><th>上游模型</th><th>属性</th><th>频道</th><th>分组</th><th>别名</th><th>优先级</th><th>状态</th><th></th></tr></thead>
           <tbody>
             {state.models.map((m) => {
               const ch = state.channels.find((c) => c.id === m.channelId);
@@ -558,6 +782,7 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
                 <tr key={m.id}>
                   <td><code>{m.name}</code></td>
                   <td className="muted">{m.upstreamModel}</td>
+                  <td><ModelTags meta={metas[m.upstreamModel || m.name]} /></td>
                   <td>{ch?.name || '—'}</td>
                   <td><Badge kind="gray">{m.group}</Badge></td>
                   <td className="muted">{m.alias || '—'}</td>
@@ -571,13 +796,14 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
                   <td>
                     <div className="row-actions">
                       {(m.disabled || cooled) && <button className="btn ghost sm" onClick={() => reset(m.id)}>重置</button>}
+                      <button className="btn ghost sm" onClick={() => openMeta(m)} title="查看/修正模型属性">属性</button>
                       <button className="btn icon danger" title="删除该模型" aria-label="删除模型" onClick={() => { if (confirm('删除该模型？')) { api.deleteModel(m.id); refresh(); } }}><IconTrash /></button>
                     </div>
                   </td>
                 </tr>
               );
             })}
-            {state.models.length === 0 && <tr><td colSpan={8} className="empty">还没有模型，去「频道」点「编辑 / 拉模型」勾选加入，或在这里手动新建</td></tr>}
+            {state.models.length === 0 && <tr><td colSpan={9} className="empty">还没有模型，去「频道」点「编辑 / 拉模型」勾选加入，或在这里手动新建</td></tr>}
           </tbody>
         </table>
       </Card>
@@ -607,6 +833,38 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
           <div className="modal-actions">
             <button className="btn secondary" onClick={() => setShow(false)}>取消</button>
             <button className="btn" onClick={save}>保存</button>
+          </div>
+        </Modal>
+      )}
+
+      {metaEdit && (
+        <Modal title={`模型属性 · ${metaEdit.name}`} onClose={() => setMetaEdit(null)}>
+          <div className="hint" style={{ marginBottom: 12 }}>
+            多数上游的 <code>/v1/models</code> 不返回能力与上下文，这里默认按模型名推断（标「推测」的尤其需要核对）；修正后保存到本机配置。
+          </div>
+          <div>
+            <strong style={{ fontSize: 13 }}>能力（可多选）</strong>
+            <div className="flex gap8 mt8" style={{ flexWrap: 'wrap' }}>
+              {CAP_ORDER.map((c) => (
+                <label key={c} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 10px', border: '1px solid var(--border)', borderRadius: 8, fontSize: 12.5 }}>
+                  <input
+                    type="checkbox"
+                    checked={metaForm.caps.includes(c)}
+                    onChange={(e) => setMetaForm((f) => ({ ...f, caps: e.target.checked ? [...f.caps, c] : f.caps.filter((x) => x !== c) }))}
+                  />
+                  {c}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="mt16">
+            <Field label="上下文窗口（token）" hint="如 128000、200000；留空表示未知">
+              <input value={metaForm.context} onChange={(e) => setMetaForm((f) => ({ ...f, context: e.target.value }))} placeholder="128000" />
+            </Field>
+          </div>
+          <div className="modal-actions">
+            <button className="btn secondary" onClick={() => setMetaEdit(null)}>取消</button>
+            <button className="btn" onClick={saveMeta}>保存</button>
           </div>
         </Modal>
       )}
