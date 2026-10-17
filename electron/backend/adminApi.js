@@ -162,6 +162,8 @@ export function createAdminApp({ store, resilience, router, logstore, session, d
     for (const n of names) out[n] = modelMeta(n, { userMeta: poolMeta.get(n) });
     res.json(out);
   });
+  // 各候选上游的实测延迟（EWMA / TTFT / 成功失败次数），模型池页「延迟」列用
+  app.get('/api/latency', (req, res) => res.json(router.latencySnapshot()));
   app.post('/api/channels/:id/speedtest', async (req, res) => {
     const c = store.getChannel(req.params.id);
     if (!c) return res.status(404).json({ error: 'not found' });

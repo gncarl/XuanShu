@@ -39,6 +39,7 @@ export const DEFAULT_SETTINGS = {
   maxRetries: 3,                        // 同一目标最大重试次数
   retryIntervalSec: 2,                  // 重试间隔（秒）
   negativeCacheMs: 600000,             // AUTO 负缓存：命中「模型不存在」类 4xx 后短期跳过该候选（0=禁用），默认 10 分钟
+  latencyBuffer: 0.5,                  // 最快优先（orderMode=fastest）：EWMA 在「最快者 ×(1+buffer)」内算同档，按优先级排，防最快单点吸流
 };
 
 export const STORE_VERSION = 1;

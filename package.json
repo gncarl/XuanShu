@@ -1,6 +1,6 @@
 {
   "name": "ai-gateway",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "玄枢（XuanShu）— 本地 AI 模型聚合路由网关：把多家上游模型收拢成统一入口，支持故障转移 / 轮询 / 加权路由",
   "type": "module",
   "main": "electron/main.js",

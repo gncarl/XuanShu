@@ -53,6 +53,8 @@ export const api = {
   resetModel: (id: string) => req('POST', `/models/${id}/reset`),
   // 批量查询模型属性（能力/上下文）：names 为模型名数组
   modelMeta: (names: string[]) => req('GET', '/model-meta?names=' + encodeURIComponent(names.join(','))),
+  // 各上游实测延迟（EWMA/TTFT/成功失败次数）
+  latency: () => req('GET', '/latency'),
 
   listRoutes: () => req('GET', '/routes'),
   addRoute: (r: any) => req('POST', '/routes', r),

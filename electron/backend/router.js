@@ -23,6 +23,45 @@ export class Router {
     this.store = store;
     this.res = resilience;
     this.rr = new Map(); // 轮询游标：routeId -> 下一次起始下标
+    // 延迟反馈（EWMA）：key = channelId\u0000upstreamModel
+    //   ewma：总耗时指数加权平均；ttft：首字延迟（流式）；n：成功次数；fails：失败次数
+    //   只统计成功请求——失败由冷却/熔断/负缓存处理，混进来会污染均值。
+    this.lat = new Map();
+  }
+
+  _latKey(channelId, upstreamModel) { return channelId + '\u0000' + upstreamModel; }
+
+  // 记录一次结果（proxy 在请求结束后调用）。latencyMs 为本次尝试耗时，ttftMs 仅流式有。
+  recordLatency(channelId, upstreamModel, { latencyMs = 0, ttftMs = null, ok = true } = {}) {
+    const k = this._latKey(channelId, upstreamModel);
+    const e = this.lat.get(k) || { ewma: null, ttft: null, n: 0, fails: 0 };
+    if (ok) {
+      e.n += 1;
+      // EWMA：新样本占 0.3，历史占 0.7（与 LiteLLM latency-based-routing 一致）
+      if (latencyMs > 0) e.ewma = e.ewma == null ? latencyMs : 0.3 * latencyMs + 0.7 * e.ewma;
+      if (ttftMs > 0) e.ttft = e.ttft == null ? ttftMs : 0.3 * ttftMs + 0.7 * e.ttft;
+    } else {
+      e.fails += 1;
+    }
+    this.lat.set(k, e);
+  }
+
+  // 供管理 API / 前端展示：{ [channelId]: { [upstreamModel]: {ewma,ttft,n,fails} } }
+  latencySnapshot() {
+    const out = {};
+    for (const [k, v] of this.lat) {
+      const i = k.indexOf('\u0000');
+      const cid = k.slice(0, i), up = k.slice(i + 1);
+      (out[cid] ||= {})[up] = { ...v };
+    }
+    return out;
+  }
+
+  // 排序用的「速度分」：TTFT 优先（对话体感主要看首字），没有则总耗时；无数据返回 null
+  _speed(x) {
+    const e = this.lat.get(this._latKey(x.channel.id, x.model.upstreamModel));
+    if (!e) return null;
+    return e.ttft ?? e.ewma ?? null;
   }
 
   // 当前可参与路由的模型（启用、频道启用、未冷却、未冻结、熔断未开）
@@ -43,13 +82,41 @@ export class Router {
   _order(pool) {
     const mode = this.store.settings.orderMode || 'custom';
     const arr = [...pool];
+    // 优先级比较（模型优先，再频道）： fastest 模式同档内、custom 模式前两级都用它
+    const byPriority = (a, b) =>
+      (a.model.priority - b.model.priority) || (a.channel.priority - b.channel.priority);
+    // 速度比较：双方有数据比快慢；仅一方有数据则「已知快的」排前；都无数据保持原序（稳定排序）
+    const bySpeed = (a, b) => {
+      const sa = this._speed(a), sb = this._speed(b);
+      if (sa == null && sb == null) return 0;
+      if (sa == null) return 1;
+      if (sb == null) return -1;
+      return sa - sb;
+    };
     if (mode === 'newest') {
       arr.sort((a, b) => (b.model.createdAt || 0) - (a.model.createdAt || 0));
+    } else if (mode === 'fastest') {
+      // 最快优先：按 EWMA（TTFT 优先）升序；latencyBuffer 内的算同档，档内按优先级排，
+      // 防止最快单点吸走全部流量（对齐 LiteLLM lowest_latency_buffer）。无数据的排最后。
+      const buf = Math.max(0, Math.min(5, Number(this.store.settings.latencyBuffer ?? 0.5)));
+      const withData = [], noData = [];
+      for (const x of arr) (this._speed(x) == null ? noData : withData).push(x);
+      withData.sort((a, b) => this._speed(a) - this._speed(b));
+      const out = [];
+      for (let i = 0; i < withData.length;) {
+        const base = this._speed(withData[i]);
+        let j = i;
+        while (j < withData.length && this._speed(withData[j]) <= base * (1 + buf)) j++;
+        const group = withData.slice(i, j);
+        group.sort(byPriority);
+        out.push(...group);
+        i = j;
+      }
+      noData.sort(byPriority);
+      return [...out, ...noData];
     } else {
-      // custom：按 model.priority 升序，再按 channel.priority 升序
-      arr.sort((a, b) =>
-        (a.model.priority - b.model.priority) ||
-        (a.channel.priority - b.channel.priority));
+      // custom：优先级 → 频道优先级 → 同档里 EWMA 快的排前（零风险提速，默认生效）
+      arr.sort((a, b) => byPriority(a, b) || bySpeed(a, b));
     }
     return arr;
   }

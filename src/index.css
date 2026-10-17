@@ -277,6 +277,10 @@ tr:last-child td { border-bottom: none; }
 .probe-cell { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; white-space: nowrap; }
 
+/* 模型池：所属频道已停用的行（默认隐藏，展开后置灰提示） */
+.row-disabled td { opacity: .5; }
+.row-disabled td .badge { opacity: 1; }
+
 /* 图标按钮（垃圾桶等）：方形、hover 变红 */
 .btn.icon {
   display: inline-flex; align-items: center; justify-content: center;

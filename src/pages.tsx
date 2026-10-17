@@ -338,9 +338,10 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
       const uniq: string[] = Array.from(new Set(r.models as string[])).sort();
       const pool = new Set(state.models.filter((m) => m.channelId === id).map((m) => m.upstreamModel || m.name));
       const p: Record<string, boolean> = {};
-      for (const m of uniq) p[m] = !pool.has(m);   // 已在池里的默认不勾
+      for (const m of uniq) p[m] = pool.has(m);   // 已在池里的回显为勾选（取消勾选=取消加入）
       setFetched(uniq); setPicked(p); setManualSet(new Set()); setMetas(r.metas || {});
-      toast(`拉取到 ${uniq.length} 个模型，勾选要加入的`);
+      const inPoolCount = uniq.filter((m) => pool.has(m)).length;
+      toast(`拉取到 ${uniq.length} 个模型，其中 ${inPoolCount} 个已在模型池（勾选=加入，取消勾选=移出）`);
     } catch (e: any) { toast('拉取失败：' + (e?.message || e)); }
     finally { setBusy(false); }
   };
@@ -360,10 +361,11 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
       next.push(n);
       nextManual.add(n);
       added++;
-      if (!pool.has(n)) nextPicked[n] = true;   // 未入池的默认勾选
+      nextPicked[n] = true;   // 未入池=待加入；已入池=保持勾选（与「已在池」回显一致）
+      if (pool.has(n)) nextPicked[n] = true;
     }
     setFetched(next); setPicked(nextPicked); setManualSet(nextManual); setManualInput('');
-    toast(`已加入列表 ${added} 个${dup ? `（${dup} 个重复已忽略）` : ''}，确认后点「加入选中的 N 个」落库`);
+    toast(`已加入列表 ${added} 个${dup ? `（${dup} 个重复已忽略）` : ''}，确认后点「应用变更」落库`);
     // 手动加入的模型也拉一份属性标签（后端按名字推断）
     const fresh = names.filter((n) => !metas[n]);
     if (fresh.length) {
@@ -373,7 +375,7 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
 
   const pickAll = (v: boolean) => {
     const n: Record<string, boolean> = {};
-    for (const m of fetched) n[m] = v && !inPool(m);
+    for (const m of fetched) n[m] = v;
     setPicked(n);
   };
   const pickNotInPool = () => {
@@ -382,22 +384,31 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
     setPicked(n);
   };
 
-  const addPicked = async () => {
+  // 应用变更：勾选且未入池 → 加入；未勾选且已入池 → 从模型池移除（取消加入）
+  const applyPicks = async () => {
     const id = form.id || (await persist());
     if (!id) return;
-    const list = fetched.filter((m) => picked[m]);
-    if (!list.length) { toast('请先勾选要加入的模型'); return; }
+    const toAdd = fetched.filter((m) => picked[m] && !inPool(m));
+    const toRemove = fetched.filter((m) => !picked[m] && inPool(m));
+    if (!toAdd.length && !toRemove.length) { toast('没有变更：勾选加入 / 取消勾选移出'); return; }
+    if (toRemove.length && !confirm(`将从模型池移除 ${toRemove.length} 个模型？\n（配置不会丢，重新勾选即可加回）`)) return;
     setBusy(true);
     try {
-      for (const m of list) {
+      for (const m of toAdd) {
         await api.addModel({
           name: m, channelId: id, upstreamModel: m,
           group: addGroup || state.settings.autoGroup,
           priority: Number(form.priority) || 100, enabled: true,
         });
       }
-      setPicked((prev) => { const n = { ...prev }; for (const m of list) n[m] = false; return n; });
-      toast(`已加入 ${list.length} 个模型到模型池`);
+      for (const m of toRemove) {
+        const entry = state.models.find((x) => x.channelId === id && (x.upstreamModel || x.name) === m);
+        if (entry) await api.deleteModel(entry.id);
+      }
+      const parts: string[] = [];
+      if (toAdd.length) parts.push(`加入 ${toAdd.length} 个`);
+      if (toRemove.length) parts.push(`移除 ${toRemove.length} 个`);
+      toast(`已应用：${parts.join('，')}`);
       await refresh();
     } finally { setBusy(false); }
   };
@@ -412,6 +423,12 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
   const shown = fetched.filter((m) => !filter || m.toLowerCase().includes(filter.toLowerCase()));
   const pickedCount = fetched.filter((m) => picked[m]).length;
   const notInPool = fetched.filter((m) => !inPool(m)).length;
+  const toAddCount = fetched.filter((m) => picked[m] && !inPool(m)).length;
+  const toRemoveCount = fetched.filter((m) => !picked[m] && inPool(m)).length;
+  const applyLabel = toAddCount && toRemoveCount ? `应用变更（+${toAddCount} / -${toRemoveCount}）`
+    : toAddCount ? `加入选中的 ${toAddCount} 个`
+    : toRemoveCount ? `取消加入 ${toRemoveCount} 个`
+    : '应用变更';
 
   return (
     <div>
@@ -435,7 +452,7 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
                   <td><Badge>{state.protocolLabels[c.protocol]}</Badge></td>
                   <td className="muted" style={{ maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.baseUrl}</td>
                   <td>{c.priority}</td>
-                  <td><Switch checked={c.enabled} onChange={(v) => { api.updateChannel(c.id, { enabled: v }); refresh(); }} /></td>
+                  <td><Switch checked={c.enabled} onChange={(v) => { api.updateChannel(c.id, { enabled: v }); if (!v) toast(`已停用「${c.name}」：其名下 ${cnt} 个模型在模型池隐藏，重新启用后自动回归`); refresh(); }} /></td>
                   <td>
                     <div className="probe-cell">
                       <button className="btn ghost sm" onClick={() => doProbe(c.id)}>{probe[c.id]?.loading ? '探测中…' : '探测'}</button>
@@ -504,7 +521,7 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
             <div className="flex between center">
               <div>
                 <strong style={{ fontSize: 13 }}>模型</strong>
-                <div className="hint" style={{ marginTop: 2 }}>拉取上游可用模型，自己勾选要加入模型池的（不必全加）。拉取前会自动保存本页配置。</div>
+                <div className="hint" style={{ marginTop: 2 }}>拉取上游可用模型，勾选加入模型池（不必全加）；已在池里的模型默认勾选，取消勾选即从模型池移出。拉取前会自动保存本页配置。</div>
               </div>
               <button className="btn secondary sm" disabled={busy} onClick={doFetch}>{busy ? '处理中…' : '拉取模型'}</button>
             </div>
@@ -535,7 +552,7 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
             {fetched.length > 0 && (
               <>
                 <div className="flex between center mt16" style={{ gap: 8, alignItems: 'center' }}>
-                  <span className="muted" style={{ fontSize: 12 }}>共 {fetched.length} 个 · 已选 {pickedCount} 个 · 未加入 {notInPool} 个</span>
+                  <span className="muted" style={{ fontSize: 12 }}>共 {fetched.length} 个 · 已在池 {fetched.length - notInPool} 个 · 待加入 {toAddCount} · 待移除 {toRemoveCount}</span>
                   <div className="flex gap8">
                     <button className="btn ghost sm" onClick={() => pickAll(true)}>全选</button>
                     <button className="btn ghost sm" onClick={() => pickAll(false)}>全不选</button>
@@ -556,7 +573,6 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
                           <input
                             type="checkbox"
                             checked={!!picked[m]}
-                            disabled={done}
                             onChange={(e) => setPicked((p) => ({ ...p, [m]: e.target.checked }))}
                           />
                           <span className="nm">{m}</span>
@@ -591,8 +607,8 @@ export function Channels({ state, refresh }: { state: State; refresh: () => void
           <div className="modal-actions">
             <button className="btn secondary" onClick={() => setOpen(false)}>取消</button>
             {fetched.length > 0 && (
-              <button className="btn secondary" disabled={busy || !pickedCount} onClick={addPicked}>
-                加入选中的 {pickedCount} 个
+              <button className="btn secondary" disabled={busy || (!toAddCount && !toRemoveCount)} onClick={applyPicks}>
+                {applyLabel}
               </button>
             )}
             <button className="btn" disabled={busy} onClick={saveOnly}>保存</button>
@@ -627,6 +643,10 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
   const [rEditId, setREditId] = useState<string | null>(null);
   const [rForm, setRForm] = useState<any>(emptyRoute());
   const [rFilter, setRFilter] = useState('');
+  // 已停用频道的模型：默认隐藏（数据保留，频道恢复后自动回归）；可手动展开
+  const [showOff, setShowOff] = useState(false);
+  // 各上游实测延迟（EWMA/TTFT）：channelId -> upstreamModel -> stats
+  const [lat, setLat] = useState<Record<string, any>>({});
 
   // 拉取模型池全部模型的属性（批量一次请求）
   useEffect(() => {
@@ -636,6 +656,15 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
     api.modelMeta(names).then((mm) => { if (alive) setMetas(mm); }).catch(() => {});
     return () => { alive = false; };
   }, [state.models]);
+
+  // 延迟统计：进入页面拉一次，之后每 30s 刷新
+  useEffect(() => {
+    let alive = true;
+    const pull = () => api.latency().then((l) => { if (alive) setLat(l || {}); }).catch(() => {});
+    pull();
+    const timer = setInterval(pull, 30000);
+    return () => { alive = false; clearInterval(timer); };
+  }, []);
 
   const save = async () => {
     if (!form.name || !form.channelId) return toast('请填写模型名并选择频道');
@@ -705,6 +734,10 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
     }
     return { ...f, targets: out };
   });
+  // 频道已停用的模型：默认不在模型池表格显示（数据保留；频道重新启用后自动回归）
+  const chOf = (m: ModelEntry) => state.channels.find((c) => c.id === m.channelId);
+  const offCount = state.models.filter((m) => { const ch = chOf(m); return !!ch && !ch.enabled; }).length;
+  const visibleModels = showOff ? state.models : state.models.filter((m) => { const ch = chOf(m); return !ch || ch.enabled; });
   const saveRoute = async () => {
     if (!rForm.name.trim()) return toast('请填写客户端模型名');
     const targets = rForm.targets.filter((t: any) => t.modelId);
@@ -770,23 +803,36 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
             <strong>上游模型（模型池）</strong>
             <div className="hint" style={{ marginTop: 2 }}>每条 = 一个「客户端模型名 → 某频道的一个上游模型」的映射。批量加入请到「频道」点「编辑 / 拉模型」。</div>
           </div>
-          <button className="btn secondary sm" onClick={() => setShow(true)}>+ 新建模型</button>
+          <div className="flex gap8">
+            {offCount > 0 && (
+              <button className="btn ghost sm" onClick={() => setShowOff((v) => !v)}>
+                {showOff ? `隐藏已停用频道的 ${offCount} 个` : `显示已停用频道的 ${offCount} 个`}
+              </button>
+            )}
+            <button className="btn secondary sm" onClick={() => setShow(true)}>+ 新建模型</button>
+          </div>
         </div>
         <table className="mt8">
-          <thead><tr><th>客户端模型名</th><th>上游模型</th><th>属性</th><th>频道</th><th>分组</th><th>别名</th><th>优先级</th><th>状态</th><th></th></tr></thead>
+          <thead><tr><th>客户端模型名</th><th>上游模型</th><th>属性</th><th>频道</th><th>分组</th><th>别名</th><th>优先级</th><th>延迟</th><th>状态</th><th></th></tr></thead>
           <tbody>
-            {state.models.map((m) => {
+            {visibleModels.map((m) => {
               const ch = state.channels.find((c) => c.id === m.channelId);
               const cooled = m.cooldownUntil > Date.now();
+              const chOff = !!ch && !ch.enabled;
+              const st = lat[m.channelId]?.[m.upstreamModel];
+              const speed = st ? (st.ttft ?? st.ewma ?? null) : null;
               return (
-                <tr key={m.id}>
+                <tr key={m.id} className={chOff ? 'row-disabled' : ''}>
                   <td><code>{m.name}</code></td>
                   <td className="muted">{m.upstreamModel}</td>
                   <td><ModelTags meta={metas[m.upstreamModel || m.name]} /></td>
-                  <td>{ch?.name || '—'}</td>
+                  <td>{ch?.name || '—'}{chOff && <Badge kind="yellow">已停用</Badge>}</td>
                   <td><Badge kind="gray">{m.group}</Badge></td>
                   <td className="muted">{m.alias || '—'}</td>
                   <td>{m.priority}</td>
+                  <td className="muted" title={st ? `首字 ${st.ttft ? Math.round(st.ttft) + 'ms' : '—'} · 总耗时 ${st.ewma ? Math.round(st.ewma) + 'ms' : '—'} · 成功 ${st.n} · 失败 ${st.fails}` : '暂无实测数据'}>
+                    {speed ? `${Math.round(speed)}ms` : '—'}
+                  </td>
                   <td>
                     {!m.enabled && <Badge kind="gray">停用</Badge>}
                     {m.enabled && m.disabled && <Badge kind="red">禁用</Badge>}
@@ -803,7 +849,7 @@ export function Models({ state, refresh }: { state: State; refresh: () => void }
                 </tr>
               );
             })}
-            {state.models.length === 0 && <tr><td colSpan={9} className="empty">还没有模型，去「频道」点「编辑 / 拉模型」勾选加入，或在这里手动新建</td></tr>}
+            {visibleModels.length === 0 && <tr><td colSpan={10} className="empty">{state.models.length ? '已停用频道的模型已隐藏，点上方按钮展开' : '还没有模型，去「频道」点「编辑 / 拉模型」勾选加入，或在这里手动新建'}</td></tr>}
           </tbody>
         </table>
       </Card>
@@ -1368,6 +1414,12 @@ export function Settings({ state, refresh, setState }: { state: State; refresh: 
             <option value="custom">自定义优先级</option><option value="newest">最新优先</option><option value="fastest">最快优先</option>
           </select>
         </Row>
+
+        {s.orderMode === 'fastest' && (
+          <Row label="最快档缓冲" desc="实测延迟在「最快者 ×(1+缓冲)」范围内算同一档，档内仍按优先级排序；防止流量全被最快的一个吸走">
+            <input type="number" step="0.1" min="0" max="5" value={s.latencyBuffer ?? 0.5} onChange={(e) => setS({ ...s, latencyBuffer: +e.target.value })} onBlur={() => save({ latencyBuffer: s.latencyBuffer })} className="set-ctl num" />
+          </Row>
+        )}
 
         {isDesktop && (
           <Row label="开机启动" desc="开机后自动在后台运行，仅显示托盘图标，不弹窗口">

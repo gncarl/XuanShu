@@ -68,6 +68,11 @@ const mock = http.createServer((req, res) => {
     if (url.includes('/chat/completions')) {
       if (model === 'missing-model') return end(res, 404, { error: 'model not found' });
       if (model === 'fail-model') return end(res, 500, { error: 'upstream boom' });
+      if (model === 'ratelimit-model') {
+        // 限流并告知多久后恢复：验证网关按 Retry-After 冷却而非固定 cooldownMs
+        res.writeHead(429, { 'Retry-After': '2', 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ error: { message: 'rate limited' } }));
+      }
       if (model === 'empty-model') { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); return res.end(); } // 空流
       if (model === 'slow-first') {
         // 首 token 延迟 12s：复现「推理模型慢思考被旧 8s 空流保护腰斩」的回归
@@ -134,7 +139,7 @@ function get(port, path) {
 async function main() {
   const mockPort = await mockListen(19899);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aigw-'));
-  const { proxyPort, adminPort, store } = await startBackend({ isDesktop: false, dataDir, version: '0.2.4' });
+  const { proxyPort, adminPort, store, logstore, proxy } = await startBackend({ isDesktop: false, dataDir, version: '0.2.5' });
   const base = `http://127.0.0.1:${proxyPort}`;
 
   // 清空示例，建立测试数据
@@ -165,13 +170,17 @@ async function main() {
   r = await client(proxyPort, '/v1/chat/completions', { model: 'gem-x', stream: true, messages: [{ role: 'user', content: 'hi' }] });
   check('T3 Gemini→OpenAI 流式转换', r.status === 200 && r.body.includes('hi-from-gemini'), `status=${r.status} body=${r.body.slice(0, 240)}`);
 
-  // T4 容错：failer 先打 500 的频道，自动切到可用频道
-  r = await client(proxyPort, '/v1/chat/completions', { model: 'failer', stream: true, messages: [{ role: 'user', content: 'hi' }] });
+  // T4 容错：同优先级候选，先打 500 的频道，自动切到可用频道。
+  // 用全新频道/模型：延迟排序会把「已知可用」的候选提前，复用旧数据就无法固定第一个必败。
+  const chFail2 = store.addChannel({ name: 'mock-fail2', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  const chOk2 = store.addChannel({ name: 'mock-ok2', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  const failerA = store.addModel({ name: 'failer-x', channelId: chFail2.id, upstreamModel: 'fail-model', group: 'AUTO', enabled: true });
+  store.addModel({ name: 'failer-x', channelId: chOk2.id, upstreamModel: 'mock-gpt', group: 'AUTO', enabled: true });
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'failer-x', stream: true, messages: [{ role: 'user', content: 'hi' }] });
   check('T4 失败自动回退到另一频道', r.status === 200 && r.body.includes('hi-from-openai'));
 
   // T7 容错后失败模型被冷却
-  const failModel = store.listModels().find((m) => m.upstreamModel === 'fail-model');
-  check('T7 失败模型进入冷却', failModel && failModel.cooldownUntil > Date.now());
+  check('T7 失败模型进入冷却', failerA && failerA.cooldownUntil > Date.now());
 
   // T5 空流保护：仅空流频道 → 502
   r = await client(proxyPort, '/v1/chat/completions', { model: 'emptier', stream: true, messages: [{ role: 'user', content: 'hi' }] });
@@ -294,7 +303,7 @@ async function main() {
     fmHdr.ok === true && fmHdr.models.includes('secure-model'), `models=${(fmHdr.models || []).join(',')}`);
 
   // ---------- T19 配置导出 / 导入（含 One API / New API 兼容格式）----------
-  const exp = buildExport(store, { version: '0.2.4' });
+  const exp = buildExport(store, { version: '0.2.5' });
   check('T19a 导出包含频道与模型且带格式标记',
     exp.app === 'xuanshu' && Array.isArray(exp.channels) && exp.channels.length > 0 && Array.isArray(exp.models),
     `channels=${exp.channels.length}`);
@@ -324,7 +333,7 @@ async function main() {
   const aboutRes = await get(adminPort, '/api/about');
   const aboutJson = JSON.parse(aboutRes.body || '{}');
   check('T20a /api/about 返回版本与仓库链接',
-    aboutRes.status === 200 && aboutJson.version === '0.2.4' && /github\.com\/gncarl\/XuanShu/.test(aboutJson.repo || ''),
+    aboutRes.status === 200 && aboutJson.version === '0.2.5' && /github\.com\/gncarl\/XuanShu/.test(aboutJson.repo || ''),
     `version=${aboutJson.version}`);
 
   const expRes = await get(adminPort, '/api/config/export');
@@ -382,6 +391,73 @@ async function main() {
   check('T22b 今天的请求已按天计入（此前若干用例已产生成功请求）',
     (statsJson.today.count || 0) > 0 && (statsJson.byDay[dayKeyNow]?.count || 0) > 0,
     `todayCount=${statsJson.today.count}`);
+
+  // ---------- T23 EWMA 延迟排序（0.2.5 路由提速）----------
+  const { Router } = await import('../electron/backend/router.js');
+  const resStub = { isModelCooled: () => false, isChannelFrozen: () => false, isBreakerOpen: () => false };
+  const r2 = new Router(store, resStub);
+  store.data.channels = []; store.data.models = [];
+  const ewA = store.addChannel({ name: 'ewma-a', baseUrl: 'http://127.0.0.1:1', apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  const ewB = store.addChannel({ name: 'ewma-b', baseUrl: 'http://127.0.0.1:1', apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  const ewC = store.addChannel({ name: 'ewma-c', baseUrl: 'http://127.0.0.1:1', apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  const mSlow = store.addModel({ name: 'sp-slow', channelId: ewA.id, upstreamModel: 'u-slow', group: 'AUTO', enabled: true, priority: 100 });
+  const mFast = store.addModel({ name: 'sp-fast', channelId: ewB.id, upstreamModel: 'u-fast', group: 'AUTO', enabled: true, priority: 100 });
+  const mMid = store.addModel({ name: 'sp-mid', channelId: ewC.id, upstreamModel: 'u-mid', group: 'AUTO', enabled: true, priority: 100 });
+  // mid-hi 优先级刻意设差（150），但延迟与 fast 同档：用来区分两种模式的预期顺序
+  const mMidHi = store.addModel({ name: 'sp-mid-hi', channelId: ewC.id, upstreamModel: 'u-mid-hi', group: 'AUTO', enabled: true, priority: 150 });
+  // 记录延迟：slow 2000ms / fast 200ms / mid 260ms / mid-hi 250ms（后两者在 fast×(1+0.5) 同档内）
+  r2.recordLatency(ewA.id, 'u-slow', { latencyMs: 2000 });
+  r2.recordLatency(ewB.id, 'u-fast', { latencyMs: 200 });
+  r2.recordLatency(ewC.id, 'u-mid', { latencyMs: 260 });
+  r2.recordLatency(ewC.id, 'u-mid-hi', { latencyMs: 250 });
+  let ord = r2.resolve('AUTO').candidates.map((c) => c.model.id);
+  // custom：优先级第一 —— 三个 100 按速度排（fast→mid→slow），150 的 mid-hi 沉底
+  check('T23a custom 同优先级按 EWMA 快的排前', ord[0] === mFast.id && ord[1] === mMid.id && ord[2] === mSlow.id && ord[3] === mMidHi.id, ord.join(','));
+  store.updateSettings({ orderMode: 'fastest' });
+  ord = r2.resolve('AUTO').candidates.map((c) => c.model.id);
+  // fastest：fast(200) 与 mid(250)/mid-hi(260) 同在 300ms 档内，档内按优先级 → fast、mid 先于 mid-hi；slow 单独一档沉底
+  check('T23b fastest 模式：档内按优先级、跨档按速度', ord[0] === mFast.id && ord[1] === mMid.id && ord[2] === mMidHi.id && ord[3] === mSlow.id, ord.join(','));
+  store.updateSettings({ orderMode: 'custom' });
+
+  // ---------- T24 /api/latency 延迟快照端点 ----------
+  const latRes = await get(adminPort, '/api/latency');
+  const latJson = JSON.parse(latRes.body || '{}');
+  check('T24 /api/latency 返回 EWMA 快照（真实路由器的实测数据）',
+    latRes.status === 200 && latJson[chOpen.id]?.['mock-gpt']?.n >= 2 && latJson[chOpen.id]?.['mock-gpt']?.ewma > 0,
+    `mock-gpt=${JSON.stringify(latJson[chOpen.id]?.['mock-gpt'] || null)}`);
+
+  // ---------- T25 429 尊重 Retry-After（0.2.5 路由提速）----------
+  // 清场：排除其它候选干扰，保证候选集合确定
+  store.data.channels = []; store.data.models = [];
+  const chRl = store.addChannel({ name: 'mock-rl', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  const chRlOk = store.addChannel({ name: 'mock-rl-ok', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  const rlModel = store.addModel({ name: 'rl-x', channelId: chRl.id, upstreamModel: 'ratelimit-model', group: 'AUTO', enabled: true });
+  const rlOkModel = store.addModel({ name: 'rl-x', channelId: chRlOk.id, upstreamModel: 'mock-gpt', group: 'AUTO', enabled: true });
+  const t25 = Date.now();
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'rl-x', stream: false, messages: [{ role: 'user', content: 'hi' }] });
+  const cdRemain = rlModel.cooldownUntil - t25;
+  check('T25a 429 后切到下一候选成功', r.status === 200 && r.body.includes('hi-from-openai'), `status=${r.status}`);
+  check('T25b 冷却时长取自 Retry-After(2s) 而非固定 5 分钟', cdRemain > 1500 && cdRemain < 6000, `cooldownRemain=${cdRemain}ms`);
+  const lastLog = logstore.query({ model: 'rl-x', page: 1, pageSize: 1 }).rows[0];
+  check('T25c 日志 attempts 记录 retryAfterMs', !!lastLog && (lastLog.attempts || []).some((a) => a.status === 429 && a.retryAfterMs === 2000), JSON.stringify(lastLog?.attempts || []));
+  // 冷却中的候选：再次请求时直接走健康候选，不再撞一次限流
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'rl-x', stream: false, messages: [{ role: 'user', content: 'hi' }] });
+  const lastLog2 = logstore.query({ model: 'rl-x', page: 1, pageSize: 1 }).rows[0];
+  check('T25d 冷却中的候选不再被重试（直接走健康候选）',
+    r.status === 200 && (lastLog2?.attempts || []).length === 0, `status=${r.status} attempts=${JSON.stringify(lastLog2?.attempts || [])}`);
+
+  // 仅剩的候选也在冷却中 → 整个请求无可用上游（503），不会无限重试
+  store.updateModel(rlOkModel.id, { enabled: false });
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'rl-x', stream: false, messages: [{ role: 'user', content: 'hi' }] });
+  check('T25e 唯一候选冷却中 → 直接 503 不重试', r.status === 503 && /no available channel/.test(r.body), `status=${r.status} body=${r.body.slice(0, 120)}`);
+
+  // ---------- T26 keep-alive 连接池 + DNS 缓存（0.2.5 路由提速）----------
+  const agents = [...proxy._agents.values()];
+  check('T26a 按频道维度建立 keep-alive 连接池', agents.length >= 1 && agents.every((a) => a.keepAlive === true), `agents=${agents.length}`);
+  const ipA = await proxy._lookup('localhost');
+  const dnsSize = proxy._dnsCache.size;
+  const ipB = await proxy._lookup('localhost');
+  check('T26b DNS 结果缓存（第二次命中不发查询）', !!ipA && ipA === ipB && dnsSize >= 1 && proxy._dnsCache.size === dnsSize, `ip=${ipA} size=${proxy._dnsCache.size}`);
 
   const failed = results.filter((x) => !x.ok).length;
   console.log(`\n结果：${results.length - failed}/${results.length} 通过`);

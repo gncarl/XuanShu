@@ -70,6 +70,8 @@ export interface Settings {
   retryStatusCodes: string;
   maxRetries: number;
   retryIntervalSec: number;
+  negativeCacheMs: number;
+  latencyBuffer: number;
 }
 
 export interface State {
