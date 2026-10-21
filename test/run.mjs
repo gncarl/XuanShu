@@ -1,6 +1,7 @@
 // 端到端验证：起一个 mock 上游 + 网关后端，验证路由/容错/五协议转换/空流保护。
 // 不需要任何真实 API Key。
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -139,7 +140,7 @@ function get(port, path) {
 async function main() {
   const mockPort = await mockListen(19899);
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aigw-'));
-  const { proxyPort, adminPort, store, logstore, proxy } = await startBackend({ isDesktop: false, dataDir, version: '0.2.5' });
+  const { proxyPort, adminPort, store, logstore, proxy } = await startBackend({ isDesktop: false, dataDir, version: '0.2.6' });
   const base = `http://127.0.0.1:${proxyPort}`;
 
   // 清空示例，建立测试数据
@@ -303,7 +304,7 @@ async function main() {
     fmHdr.ok === true && fmHdr.models.includes('secure-model'), `models=${(fmHdr.models || []).join(',')}`);
 
   // ---------- T19 配置导出 / 导入（含 One API / New API 兼容格式）----------
-  const exp = buildExport(store, { version: '0.2.5' });
+  const exp = buildExport(store, { version: '0.2.6' });
   check('T19a 导出包含频道与模型且带格式标记',
     exp.app === 'xuanshu' && Array.isArray(exp.channels) && exp.channels.length > 0 && Array.isArray(exp.models),
     `channels=${exp.channels.length}`);
@@ -333,7 +334,7 @@ async function main() {
   const aboutRes = await get(adminPort, '/api/about');
   const aboutJson = JSON.parse(aboutRes.body || '{}');
   check('T20a /api/about 返回版本与仓库链接',
-    aboutRes.status === 200 && aboutJson.version === '0.2.5' && /github\.com\/gncarl\/XuanShu/.test(aboutJson.repo || ''),
+    aboutRes.status === 200 && aboutJson.version === '0.2.6' && /github\.com\/gncarl\/XuanShu/.test(aboutJson.repo || ''),
     `version=${aboutJson.version}`);
 
   const expRes = await get(adminPort, '/api/config/export');
@@ -458,6 +459,51 @@ async function main() {
   const dnsSize = proxy._dnsCache.size;
   const ipB = await proxy._lookup('localhost');
   check('T26b DNS 结果缓存（第二次命中不发查询）', !!ipA && ipA === ipB && dnsSize >= 1 && proxy._dnsCache.size === dnsSize, `ip=${ipA} size=${proxy._dnsCache.size}`);
+
+  // ---------- T27/T28/T29 0.2.6 连接超时 + 预热 + 响应超时 ----------
+  // T27a 死候选（连接被拒）经 failover 快速到健康候选，不卡 30s
+  store.updateSettings({ connectTimeoutMs: 1500 });
+  const chDead = store.addChannel({ name: 'dead-port', baseUrl: 'http://127.0.0.1:1', apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  store.addModel({ name: 'dead-x', channelId: chDead.id, upstreamModel: 'mock-gpt', group: 'AUTO', enabled: true });
+  const chOk3 = store.addChannel({ name: 'ok3', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 100 });
+  store.addModel({ name: 'dead-x', channelId: chOk3.id, upstreamModel: 'mock-gpt', group: 'AUTO', enabled: true });
+  let t27start = Date.now();
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'dead-x', stream: false, messages: [{ role: 'user', content: 'hi' }] });
+  let t27elapsed = Date.now() - t27start;
+  check('T27a 死候选快速 failover 到健康候选（不卡 30s）', r.status === 200 && r.body.includes('hi-from-openai') && t27elapsed < 5000, `status=${r.status} elapsed=${t27elapsed}ms`);
+
+  // T27b 单候选不可达 IP：connectTimeoutMs 在合理时间内返回失败（不卡 30s）
+  const chUnreach = store.addChannel({ name: 'unreach', baseUrl: 'http://10.255.255.1:443', apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  store.addModel({ name: 'unreach-x', channelId: chUnreach.id, upstreamModel: 'mock-gpt', group: 'AUTO', enabled: true });
+  t27start = Date.now();
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'unreach-x', stream: false, messages: [{ role: 'user', content: 'hi' }] });
+  t27elapsed = Date.now() - t27start;
+  check('T27b 不可达候选在 connectTimeoutMs 量级内返回（不卡 30s）', r.status === 502 && t27elapsed < 8000, `status=${r.status} elapsed=${t27elapsed}ms`);
+
+  // T28 启动预热：warmUp 成功后 router 写入 EWMA（排序不再退化，且不可达者被冷却）
+  const chWarm = store.addChannel({ name: 'warm', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  store.addModel({ name: 'warm-x', channelId: chWarm.id, upstreamModel: 'mock-gpt', group: 'AUTO', enabled: true });
+  await proxy.warmUp();
+  const snap = proxy.router.latencySnapshot();
+  const warmEwma = !!(snap[chWarm.id] && snap[chWarm.id]['mock-gpt'] && typeof snap[chWarm.id]['mock-gpt'].ewma === 'number');
+  check('T28 预热探测成功写入 EWMA', warmEwma, `snap=${JSON.stringify(snap[chWarm.id] || {})}`);
+  // 不可达频道（chUnreach）应被预热冷却，路由跳过它
+  const unreachModel = store.listModels().find((m) => m.channelId === chUnreach.id);
+  check('T28b 预热把不可达频道冷却（用户请求不再撞）', !!unreachModel && unreachModel.cooldownUntil > Date.now(), `cooled=${!!(unreachModel && unreachModel.cooldownUntil > Date.now())}`);
+
+  // T29 响应超时（非流式）：连接成功但上游挂起，responseTimeoutMs 触发 failover
+  const slowServer = net.createServer((sock) => { /* 接受连接但永不响应 */ });
+  const slowPort = await new Promise((res) => slowServer.listen(0, '127.0.0.1', () => res(slowServer.address().port)));
+  store.updateSettings({ responseTimeoutMs: 2000, connectTimeoutMs: 1500 });
+  const chHang = store.addChannel({ name: 'slow', baseUrl: `http://127.0.0.1:${slowPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 1 });
+  store.addModel({ name: 'hang-x', channelId: chHang.id, upstreamModel: 'mock-gpt', group: 'AUTO', enabled: true });
+  const chOk4 = store.addChannel({ name: 'ok4', baseUrl: `http://127.0.0.1:${mockPort}`, apiKey: 'k', protocol: 'openai', enabled: true, priority: 100 });
+  store.addModel({ name: 'hang-x', channelId: chOk4.id, upstreamModel: 'mock-gpt', group: 'AUTO', enabled: true });
+  const t29start = Date.now();
+  r = await client(proxyPort, '/v1/chat/completions', { model: 'hang-x', stream: false, messages: [{ role: 'user', content: 'hi' }] });
+  const t29elapsed = Date.now() - t29start;
+  check('T29 非流式响应超时触发 failover（不挂起卡死）', r.status === 200 && r.body.includes('hi-from-openai') && t29elapsed < 6000, `status=${r.status} elapsed=${t29elapsed}ms`);
+  slowServer.close();
 
   const failed = results.filter((x) => !x.ok).length;
   console.log(`\n结果：${results.length - failed}/${results.length} 通过`);

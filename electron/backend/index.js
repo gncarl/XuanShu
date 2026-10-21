@@ -65,6 +65,9 @@ export async function startBackend(opts = {}) {
   // 把实际端口写回设置（供 UI / 连接器使用）
   store.updateSettings({ adminPort, proxyPort });
 
+  // 0.2.6：启动预热 + 空闲保活（DNS 预解析 / 建热连接 / 探测可达性，不可达者自动剔除）
+  proxy.startWarmup();
+
   console.log(`[玄枢] 代理端口    : http://127.0.0.1:${proxyPort}`);
   console.log(`[玄枢] 管理/WebAdmin: http://127.0.0.1:${adminPort}`);
   console.log(`[玄枢] 数据目录    : ${dataDir}`);

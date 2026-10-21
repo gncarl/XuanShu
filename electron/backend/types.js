@@ -26,6 +26,10 @@ export const DEFAULT_SETTINGS = {
   channelFreezeMs: 10 * 60 * 1000, // L3：频道整体冻结时长
   emptyStreamTimeoutMs: 60000,     // 空流保护：首个 token 多久没来才视为上游无响应（推理模型首 token 常超 8s，故放宽到 60s）
   streamIdleTimeoutMs: 600000,     // 流已开始后，两次数据之间的空闲上限，仅用于兜底「僵尸连接」；不短设，避免长思考被掐断
+  connectTimeoutMs: 10000,         // 0.2.6：连接建立超时（DNS+TCP+TLS 整体），超时立即 failover，消灭「不可达候选卡 30s」
+  responseTimeoutMs: 20000,        // 0.2.6：非流式响应超时（连接成功后到收完响应），超时立即 failover，解决非流式挂起卡 600s
+  enableWarmUp: true,              // 0.2.6：启动预热 + 空闲保活
+  warmUpIntervalMs: 300000,        // 0.2.6：预热/保活周期（默认 5 分钟）
   logCapBytes: 50 * 1024 * 1024,   // 日志上限 50MB（取代 30G 备份）
   logCapLines: 200000,
   theme: 'light',

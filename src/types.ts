@@ -72,6 +72,10 @@ export interface Settings {
   retryIntervalSec: number;
   negativeCacheMs: number;
   latencyBuffer: number;
+  connectTimeoutMs: number;
+  responseTimeoutMs: number;
+  enableWarmUp: boolean;
+  warmUpIntervalMs: number;
 }
 
 export interface State {

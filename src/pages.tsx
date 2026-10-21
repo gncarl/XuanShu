@@ -1421,6 +1421,16 @@ export function Settings({ state, refresh, setState }: { state: State; refresh: 
           </Row>
         )}
 
+        <Row label="启用预热" desc="启动即对全部启用频道预解析 DNS、建立热连接并探测可达性；不可达者自动跳过。让你想用玄枢时连接已是热的，不再等 30 秒">
+          <CheckBox checked={s.enableWarmUp !== false} onChange={(v) => save({ enableWarmUp: v })} />
+        </Row>
+        <Row label="预热间隔" desc="每隔多久重新保活连接并探测可达性（仅启用预热时生效）">
+          <div className="flex center gap8">
+            <input type="number" min={30} value={Math.round((s.warmUpIntervalMs || 300000) / 1000)} onChange={(e) => setS({ ...s, warmUpIntervalMs: Math.max(30, +e.target.value) * 1000 })} onBlur={() => save({ warmUpIntervalMs: s.warmUpIntervalMs })} className="set-ctl num" style={{ width: 110 }} />
+            <span className="muted">秒</span>
+          </div>
+        </Row>
+
         {isDesktop && (
           <Row label="开机启动" desc="开机后自动在后台运行，仅显示托盘图标，不弹窗口">
             <CheckBox checked={autoLaunch} onChange={toggleAutoLaunch} />
@@ -1477,6 +1487,18 @@ export function Settings({ state, refresh, setState }: { state: State; refresh: 
       </Card>
 
       <Card className="mt16" style={{ padding: '4px 18px' }}>
+        <Row label="连接超时" desc="建连（DNS+TCP+TLS）超过此时长未成功即切换下一候选，避免单个不可达上游把整次请求卡住几十秒">
+          <div className="flex center gap8">
+            <input type="number" min={1000} value={s.connectTimeoutMs || 10000} onChange={(e) => setS({ ...s, connectTimeoutMs: +e.target.value })} onBlur={() => save({ connectTimeoutMs: s.connectTimeoutMs })} className="set-ctl num" style={{ width: 130 }} />
+            <span className="muted">ms</span>
+          </div>
+        </Row>
+        <Row label="响应超时（非流式）" desc="连接成功后到收完响应超过此时长即切换，解决非流式请求在无响应上游上挂起卡死">
+          <div className="flex center gap8">
+            <input type="number" min={1000} value={s.responseTimeoutMs || 20000} onChange={(e) => setS({ ...s, responseTimeoutMs: +e.target.value })} onBlur={() => save({ responseTimeoutMs: s.responseTimeoutMs })} className="set-ctl num" style={{ width: 130 }} />
+            <span className="muted">ms</span>
+          </div>
+        </Row>
         <Row label="空流保护超时" desc="上游 200 但迟迟不出字，判定失败并切换">
           <div className="flex center gap8">
             <input type="number" value={s.emptyStreamTimeoutMs} onChange={(e) => setS({ ...s, emptyStreamTimeoutMs: +e.target.value })} onBlur={() => save({ emptyStreamTimeoutMs: s.emptyStreamTimeoutMs })} className="set-ctl num" style={{ width: 130 }} />

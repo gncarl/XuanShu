@@ -36,23 +36,32 @@
 - ✅ **P0-3 429/503 尊重 `Retry-After`**：按上游告知时长冷却候选（替代固定 cooldownMs）；长等待跳过同目标原地重试直接切换；attempts 记录 retryAfterMs。
 - ✅ **P1-2 TTFT 单独打点**：流式首字节延迟计入 EWMA 并作为排序速度分（对话体感主要看首字）。
 
-## 0.2.6（规划中 · 2026-10-17 记录）
+## 0.2.6（规划中 · 2026-10-21 · 性能专项：首次连接慢 / 链接不稳）
 
-- [ ] **应用内自动更新（electron-updater + GitHub Releases）**：0.2.3「关于」面板里的「检查更新」目前只是后端代理请求 GitHub 比对版本号、提示手动下载；本项做真正的应用内更新链路。
-  - 方案：`electron-updater`（Electron 应用内更新事实标准），更新源指向本仓库 GitHub Releases（`gncarl/XuanShu`）。
-  - 主进程：新增 `electron/updater.js`——`autoUpdater.checkForUpdates()` → `update-available` → `downloadUpdate`（进度事件）→ `update-downloaded` → `quitAndInstall()`；IPC 桥接（`update:check` / `update:progress` / `update:install`）给渲染层。
-  - UI：「关于」面板（或设置页）显示当前版本 + 「检查更新」按钮 + 状态流（检查中 → 已是最新版 / 发现新版本 x.y.z（下载中 NN%）→ 下载完成，重启安装）；失败提示 + 「去 GitHub 手动下载」兜底链接。
-  - 打包：`electron-builder` 配置 `publish: { provider: 'github', owner: 'gncarl', repo: 'XuanShu' }`；electron-builder 每次打包会自动产出 `latest.yml` + `.blockmap`（已验证 0.2.5 产物里已有）。
-  - **注意点（实现时必须处理）**：
-    1. 玄枢**无代码签名证书**，electron-updater 默认校验更新包签名会直接失败 → 设置 `autoUpdater.verifyUpdateCodeSignature = false`（仅用 latest.yml 里的 sha512 校验完整性）。安装时用户仍会看到「未知发布者」警告——与现在手动双击安装的体验一致，不算倒退。
-    2. **每次手动建 GitHub Release 时必须同时上传 `latest.yml`**（打包产物目录里现成，和 exe 一起拖上去），否则客户端检查更新会 404。需在发布说明模板 / 收尾检查清单里加这一步。
-    3. 国内网络从 GitHub Releases 下载 84MB 可能很慢或中断 → 下载进度展示 + 失败可重试 + 保留下载页兜底；后续如需可换源（Gitee Releases / 对象存储），electron-updater 的 `setFeedURL` 支持自定义源，数据结构不变。
-    4. delta 差量更新依赖签名，未签名只能全量下载；可接受（84MB）。
-    5. 建议「启动时静默检查 + 手动检查按钮」双通道，静默检查失败不打扰。
-- [ ] **P1-1 least-busy 并发均衡**：router 维护每候选 in-flight 计数，priority 相同或 roundrobin 组内优先选空闲候选。
-- [ ] **P1-3 后台预热探测**：定时任务（如 5 分钟）对启用候选发 1-token 请求，预热连接 + 刷新 EWMA，避免「首个用户请求替所有人热身」。
-- [ ] **P2-1 动态 priority 微调**：按近期成功率对静态 priority ±1 档浮动。
-- [ ] **P2-2 并行 hedging**：首候选超过 P75 延迟无首字节时并行试探第二候选；有双写风险，建议仅非流式开启，默认关。
+> 用户痛点：玄枢跟其他 agent 链接「进场不稳」，第一次发起请求有时 30 秒以上才返回；希望在要用玄枢时能最快连上。
+
+### 根因（已读代码确认）
+- 玄枢**直连上游**，未读取系统代理环境变量（无 proxy-agent / global-agent），排除「死代理拖累」。
+- **缺连接建立超时 + 非流式首字节超时**：命中不可达/极慢候选时，Node 在 TCP 重传上耗 20–30s+ 才报错并 failover → 用户感知「首次 30 秒以上」。当前只有流建立后的空闲超时（默认 600s）。
+- **冷启动 / 空闲后**：DNS 未缓存 + keep-alive 全冷 + EWMA 全 0（排序退化），首个候选若慢即卡。
+
+### P0（头号 · 解决 30 秒卡死 + 想用时即热）— ✅ 已随 v0.2.6 实现并发布
+- ✅ **连接建立超时 `connectTimeoutMs`（默认 10s）**：DNS+TCP+TLS 整体硬超时，超时立即 failover 到下一候选（消灭 30s 卡死）。
+- ✅ **非流式响应超时 `responseTimeoutMs`（默认 20s）**：连接成功后到收完响应（或首字节）的时间上限，超时立即 failover（解决非流式挂起卡 600s）。流式仍由 `emptyStreamTimeoutMs`(60s) 保护。
+- ✅ **启动预热 + 空闲保活 `warmUp`**：启动后立刻对**全部启用且未冷却/未冻结**候选：预解析 DNS + 建立 keep-alive 热连接 + `GET /v1/models` 探测；不可达者立即冷却剔除，成功者写 EWMA 初值。周期（默认 5min）持续保活。
+- ✅ **设置项 + UI**：`connectTimeoutMs` / `responseTimeoutMs` / `enableWarmUp` / `warmUpIntervalMs` 写入 `DEFAULT_SETTINGS`，设置页新增「连接与预热」分组。
+
+> 以上 P0 四项已随 v0.2.6（2026-10-21）实现、测试（55/55）通过并发布。P1/P2 顺延。
+
+### P1
+- [ ] **预热/探测并发化 + 超时**：现有串行 `probeChannel` 改为并发（限制并发数）+ 套用 `connectTimeoutMs`；频道表格「探测」展示耗时。
+- [ ] **DNS 常驻预解析**：启动即解析全部启用频道域名并绑定 IP，避免请求时现解析（与 warmUp 的 DNS 预解析合并实现）。
+- [ ] **least-busy 并发均衡**：router 维护每候选 in-flight 计数，priority 相同或 roundrobin 组内优先选空闲候选。
+- [ ] **动态 priority 微调**：按近期成功率对静态 priority ±1 档浮动。
+
+### P2
+- [ ] **hedging 并行试探**：首候选连接成功但 N 秒无首字节时并行开第二候选，先出字者胜；默认关，避免双写。
+- [ ] **应用内自动更新（electron-updater + GitHub Releases）**：真链路（主进程 `electron/updater.js` + IPC + UI + `publish.github`）。注意：`verifyUpdateCodeSignature=false`（无签名）；手动建 Release 须同传 `latest.yml`；国内 GitHub 下载慢 → 进度+兜底。
 
 ## 待评估 /  backlog（尚未排期）
 
